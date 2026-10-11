@@ -1,3 +1,9 @@
+## [1.31.1](https://github.com/Zanuaimi/UniPatches/compare/v1.31.0...v1.31.1) (2026-10-11)
+
+### 🔧 Improvements
+
+* **compatibility:** Improve legacy app compatibility patch by replacing hardcoded solutions with generic, and adding more presets like android 4 and 5 ([21e5e44](https://github.com/Zanuaimi/UniPatches/commit/21e5e44f3608bc033b3612fe797a345b3c7548bb))
+
 ## [1.31.1-dev.1](https://github.com/Zanuaimi/UniPatches/compare/v1.31.0...v1.31.1-dev.1) (2026-10-11)
 
 ### 🔧 Improvements
