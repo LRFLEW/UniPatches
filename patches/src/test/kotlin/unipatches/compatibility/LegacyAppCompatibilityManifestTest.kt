@@ -40,9 +40,11 @@ class LegacyAppCompatibilityManifestTest {
     @Test
     fun originalTargetSdkReadsValue() {
         val document = newDocument()
+        val manifest = document.createElement("manifest")
         val usesSdk = document.createElement("uses-sdk")
         usesSdk.setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "21")
-        document.appendChild(usesSdk)
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
         assertEquals(21, originalTargetSdk(document))
     }
 
@@ -50,10 +52,99 @@ class LegacyAppCompatibilityManifestTest {
     fun originalTargetSdkReturnsNullWhenAbsentOrInvalid() {
         assertNull(originalTargetSdk(newDocument()))
         val document = newDocument()
+        val manifest = document.createElement("manifest")
         val usesSdk = document.createElement("uses-sdk")
         usesSdk.setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "abc")
-        document.appendChild(usesSdk)
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
         assertNull(originalTargetSdk(document))
+    }
+
+    @Test
+    fun updateTargetSdkCreatesUsesSdkBeforeApplicationAndIsIdempotent() {
+        val document = newDocument()
+        val manifest = document.createElement("manifest")
+        val application = document.createElement("application")
+        manifest.appendChild(application)
+        document.appendChild(manifest)
+
+        assertTrue(updateTargetSdk(document, 27))
+        assertEquals("uses-sdk", manifest.firstChild.nodeName)
+        assertEquals(27, originalTargetSdk(document))
+        assertFalse(updateTargetSdk(document, 27))
+    }
+
+    @Test
+    fun customTargetSdkUpdateReportsAndReadsBackFinalValue() {
+        val document = newDocument()
+        val manifest = document.createElement("manifest")
+        val usesSdk = document.createElement("uses-sdk").apply {
+            setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "16")
+        }
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
+
+        val result = applyLegacyTargetSdk(document, spoofEnabled = true, profile = TARGET_PROFILE_CUSTOM, customTarget = 34)
+
+        assertEquals(16, result.originalTarget)
+        assertEquals(34, result.selectedTarget)
+        assertEquals(34, result.finalTarget)
+        assertEquals(LegacyTargetSdkOutcome.UPDATED, result.outcome)
+    }
+
+    @Test
+    fun automaticTargetSdkSelectionReportsPreservationOfLegacyValue() {
+        val document = newDocument()
+        val manifest = document.createElement("manifest")
+        val usesSdk = document.createElement("uses-sdk").apply {
+            setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "16")
+        }
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
+
+        val result = applyLegacyTargetSdk(document, spoofEnabled = true, profile = TARGET_PROFILE_AUTOMATIC, customTarget = 34)
+
+        assertEquals(16, result.selectedTarget)
+        assertEquals(16, result.finalTarget)
+        assertEquals(LegacyTargetSdkOutcome.AUTOMATIC_PRESERVED, result.outcome)
+        assertEquals("16", usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion"))
+    }
+
+    @Test
+    fun disabledTargetSdkSpoofReportsUnchangedValue() {
+        val document = newDocument()
+        val manifest = document.createElement("manifest")
+        val usesSdk = document.createElement("uses-sdk").apply {
+            setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "16")
+        }
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
+
+        val result = applyLegacyTargetSdk(document, spoofEnabled = false, profile = TARGET_PROFILE_CUSTOM, customTarget = 34)
+
+        assertEquals(16, result.originalTarget)
+        assertNull(result.selectedTarget)
+        assertEquals(16, result.finalTarget)
+        assertEquals(LegacyTargetSdkOutcome.DISABLED, result.outcome)
+    }
+
+    @Test
+    fun targetSdkReadAndUpdateSupportPrefixedManifestAndIgnoreNestedDecoys() {
+        val document = newDocument()
+        val manifest = document.createElementNS("urn:manifest", "m:manifest")
+        val application = document.createElementNS("urn:manifest", "m:application")
+        val nestedDecoy = document.createElementNS("urn:manifest", "m:uses-sdk").apply {
+            setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "16")
+        }
+        application.appendChild(nestedDecoy)
+        manifest.appendChild(application)
+        document.appendChild(manifest)
+
+        assertNull(originalTargetSdk(document))
+        assertTrue(updateTargetSdk(document, 27))
+        assertEquals("m:uses-sdk", manifest.firstChild.nodeName)
+        assertEquals(27, originalTargetSdk(document))
+        assertEquals("16", nestedDecoy.getAttributeNS(NS_ANDROID, "targetSdkVersion"))
     }
 
     @Test

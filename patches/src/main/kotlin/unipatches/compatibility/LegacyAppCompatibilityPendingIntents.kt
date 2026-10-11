@@ -51,6 +51,7 @@ internal data class DownloaderPendingIntentTarget(
     val parameterTypes: List<String>,
 )
 
+// Shared Google Play expansion-downloader library call sites; apply only when these classes are present.
 internal val downloaderPendingIntentTargets = listOf(
     DownloaderPendingIntentTarget(DOWNLOADER_ACTIVITY, "finishOnCreate", emptyList()),
     DownloaderPendingIntentTarget(

@@ -2,6 +2,7 @@ package unipatches.compatibility
 
 import app.morphe.patcher.patch.rawResourcePatch
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -13,7 +14,7 @@ import org.w3c.dom.Document
 import org.w3c.dom.Element
 
 private const val EXPANSION_ASSET_DIRECTORY = "assets/unipatch-legacy-expansion"
-private val expansionFilePattern = Regex("(?:main|patch)\\.\\d+\\.([A-Za-z0-9_.]+)\\.obb")
+private val expansionFilePattern = Regex("(?:main|patch)\\.(\\d+)\\.([A-Za-z0-9_.]+)\\.obb")
 private val nativeEntryPattern = Regex("assets/libs/([^/]+)/([^/]+\\.so)")
 
 internal data class LegacyExpansionOptions(
@@ -60,10 +61,57 @@ internal fun expansionNativeDestination(entryName: String): String? =
         "lib/$abi/$fileName"
     }
 
-internal fun isExpansionFileForPackage(fileName: String, packageName: String?): Boolean {
+internal fun isExpansionFileForPackage(
+    fileName: String,
+    packageName: String?,
+    expectedVersionCode: String? = null,
+): Boolean {
     val match = expansionFilePattern.matchEntire(fileName) ?: return false
-    return packageName?.takeIf { it.isNotBlank() } == match.groupValues[1]
+    return packageName?.takeIf { it.isNotBlank() } == match.groupValues[2] &&
+        (expectedVersionCode.isNullOrBlank() || expectedVersionCode == match.groupValues[1])
 }
+
+internal fun validateExpansionObbInput(
+    path: String,
+    packageName: String,
+    expectedVersionCode: String? = null,
+): File {
+    val selectedPath = path.trim()
+    require(selectedPath.isNotEmpty()) {
+        "Legacy compatibility: OBB path is required when expansion OBB options are selected."
+    }
+    require(packageName.isNotBlank()) {
+        "Legacy compatibility: cannot validate expansion OBB because APK package name could not be resolved."
+    }
+    val source = File(selectedPath)
+    require(source.isFile && source.canRead()) {
+        "Legacy compatibility: expansion OBB is missing or unreadable: ${source.absolutePath}"
+    }
+    require(isExpansionFileForPackage(source.name, packageName, expectedVersionCode)) {
+        val version = expectedVersionCode?.takeIf { it.isNotBlank() }?.let { " versionCode $it" }.orEmpty()
+        "Legacy compatibility: OBB filename does not match APK package $packageName$version: ${source.name}"
+    }
+    try {
+        ZipFile(source).use { zip ->
+            require(zip.entries().hasMoreElements()) {
+                "Legacy compatibility: expansion OBB contains no entries: ${source.name}"
+            }
+        }
+    } catch (error: IOException) {
+        throw IllegalArgumentException(
+            "Legacy compatibility: expansion OBB is not a readable ZIP archive: ${source.name}",
+            error,
+        )
+    }
+    return source
+}
+
+internal fun expansionObbInstallInstruction(packageName: String, fileName: String, embedded: Boolean): String =
+    if (embedded) {
+        "Embedded OBB will be staged on first launch to Android/obb/$packageName/$fileName; no separate OBB install is required."
+    } else {
+        "Install $fileName at <external-storage>/Android/obb/$packageName/$fileName alongside the patched APK."
+    }
 
 /** Copies an OBB while omitting only entries explicitly marked as relocated. */
 internal fun rewriteExpansionObb(source: File, output: File, removedEntries: Set<String>) {
@@ -129,21 +177,14 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
         if (!options.relocateNativeLibraries && !options.embedExpansionObb && !options.removeRelocatedNativeLibrariesFromObb) {
             return@execute
         }
-        if (options.obbPath.isBlank()) {
-            logger.warning("Legacy compatibility: expansion options selected without an OBB path; expansion changes skipped.")
-            return@execute
-        }
-        val source = File(options.obbPath)
-        require(source.isFile && source.canRead()) {
-            "Legacy compatibility: expansion OBB is missing or unreadable: ${source.absolutePath}"
+        require(
+            !options.removeRelocatedNativeLibrariesFromObb || (options.relocateNativeLibraries && options.embedExpansionObb),
+        ) {
+            "Legacy compatibility: removing relocated OBB libraries requires both native-library relocation and OBB embedding."
         }
         val packageName = StartupHooks.resolvedPackageName
-        require(!packageName.isNullOrBlank()) {
-            "Legacy compatibility: cannot validate expansion OBB because APK package name could not be resolved."
-        }
-        require(isExpansionFileForPackage(source.name, packageName)) {
-            "Legacy compatibility: expected main.<versionCode>.<package>.obb or patch.<versionCode>.<package>.obb matching package $packageName, got ${source.name}"
-        }
+            ?: error("Legacy compatibility: cannot validate expansion OBB because APK package name could not be resolved.")
+        val source = validateExpansionObbInput(options.obbPath, packageName, StartupHooks.resolvedVersionCode)
 
         val nativeEntries = mutableListOf<Pair<String, String>>()
 
@@ -171,33 +212,38 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
             }
         }
 
-        val rewriteEmbeddedObb = options.removeRelocatedNativeLibrariesFromObb &&
-            options.relocateNativeLibraries && options.embedExpansionObb
-        if (options.removeRelocatedNativeLibrariesFromObb && !rewriteEmbeddedObb) {
-            logger.warning("Legacy compatibility: removing relocated OBB libraries requires both native-library relocation and OBB embedding; OBB rewrite skipped.")
-        }
+        val rewriteEmbeddedObb = options.removeRelocatedNativeLibrariesFromObb
         if (options.embedExpansionObb) {
             val output = get(expansionAssetPath(source.name), false)
             if (rewriteEmbeddedObb) {
                 rewriteExpansionObb(source, output, nativeEntries.map { it.first }.toSet())
-                logger.info("Legacy compatibility: embedded expansion OBB ${source.name} without ${nativeEntries.size} relocated native libraries.")
             } else {
                 output.parentFile?.mkdirs()
                 source.inputStream().use { input ->
                     output.outputStream().use { outputStream -> input.copyTo(outputStream, DEFAULT_COPY_BUFFER) }
                 }
-                logger.info("Legacy compatibility: embedded expansion OBB ${source.name} (${source.length()} bytes).")
             }
             val checksumAsset = get(expansionChecksumAssetPath(source.name), false)
             checksumAsset.parentFile?.mkdirs()
             val checksumText = expansionChecksumText(output)
             checksumAsset.writeText(checksumText)
-            logger.info("Legacy compatibility: embedded OBB checksum metadata prepared for ${source.name} (${output.length()} bytes).")
+            val outputSha256 = checksumText.trimEnd().substringAfter('\n')
+            logger.info(
+                "Legacy compatibility: OBB embedded source=${source.name} sourceBytes=${source.length()} embeddedBytes=${output.length()} sha256=$outputSha256 relocatedNativeLibraries=${if (rewriteEmbeddedObb) nativeEntries.size else 0}.",
+            )
+            logger.info("Legacy compatibility install: " + expansionObbInstallInstruction(packageName, source.name, embedded = true))
+        } else {
+            val sourceSha256 = expansionSha256(source)
+            logger.info("Legacy compatibility: OBB validated for separate install name=${source.name} bytes=${source.length()} sha256=$sourceSha256.")
+            logger.info("Legacy compatibility install: " + expansionObbInstallInstruction(packageName, source.name, embedded = false))
         }
     }
 }
 
-/** Moves the expansion downloader's launcher filter to the known Unity launcher. */
+/**
+ * Moves the standard Google expansion-downloader launcher to the GLU AUnityInstaller SDK activity.
+ * This exact component fingerprint is shared by APKs using that library and is not package-gated.
+ */
 internal fun moveExpansionDownloaderLauncher(document: Document, logger: Logger): Int {
     val application = document.documentElement?.let { root ->
         val nodes = root.getElementsByTagName("application")

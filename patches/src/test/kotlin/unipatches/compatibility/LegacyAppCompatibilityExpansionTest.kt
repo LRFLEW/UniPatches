@@ -7,6 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.w3c.dom.Document
 import org.w3c.dom.Element
@@ -32,12 +33,62 @@ class LegacyAppCompatibilityExpansionTest {
     }
 
     @Test
-    fun validatesMainAndPatchObbNamesAgainstPackage() {
+    fun validatesMainAndPatchObbNamesAgainstPackageAndVersionCode() {
         assertTrue(isExpansionFileForPackage("main.123.org.example.legacy.obb", "org.example.legacy"))
         assertTrue(isExpansionFileForPackage("patch.456.org.example.legacy.obb", "org.example.legacy"))
+        assertTrue(isExpansionFileForPackage("main.123.org.example.legacy.obb", "org.example.legacy", "123"))
+        assertFalse(isExpansionFileForPackage("main.123.org.example.legacy.obb", "org.example.legacy", "124"))
         assertFalse(isExpansionFileForPackage("patch.123.other.app.obb", "org.example.legacy"))
         assertFalse(isExpansionFileForPackage("main.123.org.example.legacy.obb", null))
         assertFalse(isExpansionFileForPackage("expansion.obb", null))
+    }
+
+    @Test
+    fun requiresReadableObbPathMatchingApkPackage() {
+        val directory = java.nio.file.Files.createTempDirectory("legacy-obb-input-").toFile()
+        val valid = File(directory, "main.123.com.glu.gunbros2.obb")
+        ZipOutputStream(valid.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry("assets/bin/Data/main.dat"))
+            zip.write("test".toByteArray())
+            zip.closeEntry()
+        }
+        try {
+            assertEquals(valid, validateExpansionObbInput(valid.path, "com.glu.gunbros2", expectedVersionCode = "123"))
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(valid.path, "com.glu.gunbros2", expectedVersionCode = "124")
+            }.message!!.contains("versionCode 124"))
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput("", "com.glu.gunbros2")
+            }.message!!.contains("OBB path is required"))
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(File(directory, "missing.obb").path, "com.glu.gunbros2")
+            }.message!!.contains("missing or unreadable"))
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(valid.path, "com.other.game")
+            }.message!!.contains("does not match APK package"))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rejectsUnreadableObbArchivesWithClearMessage() {
+        val directory = java.nio.file.Files.createTempDirectory("legacy-corrupt-obb-").toFile()
+        val corrupt = File(directory, "main.123.com.glu.gunbros2.obb").apply { writeText("not a zip") }
+        try {
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(corrupt.path, "com.glu.gunbros2")
+            }.message!!.contains("not a readable ZIP archive"))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun reportsWhetherObbMustShipSeparately() {
+        val name = "main.123.com.glu.gunbros2.obb"
+        assertTrue(expansionObbInstallInstruction("com.glu.gunbros2", name, embedded = true).contains("staged on first launch"))
+        assertTrue(expansionObbInstallInstruction("com.glu.gunbros2", name, embedded = false).contains("Android/obb/com.glu.gunbros2/$name"))
     }
 
     @Test
@@ -122,6 +173,7 @@ class LegacyAppCompatibilityExpansionTest {
     private fun launcherDocument(unityHasLauncher: Boolean, downloaderFilters: Int): Document {
         val document = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }.newDocumentBuilder().newDocument()
         val manifest = document.createElement("manifest")
+        manifest.setAttribute("package", "org.example.unitygame")
         val application = document.createElement("application")
         val downloader = document.createElement("activity")
         val unity = document.createElement("activity")

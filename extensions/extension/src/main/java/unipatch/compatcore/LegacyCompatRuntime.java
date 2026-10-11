@@ -7,7 +7,10 @@
  */
 package unipatch.compatcore;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.res.AssetManager;
 import android.os.Environment;
 import android.util.Log;
@@ -37,6 +40,25 @@ public final class LegacyCompatRuntime {
     private static final String TAG = "UniPatchLegacy";
 
     private static volatile Context appContext = null;
+
+    static boolean requiresReceiverFlags(int sdk) {
+        return sdk >= 33;
+    }
+
+    /**
+     * Applies exported/private flags on Android 13+ and preserves the legacy overload before API 33.
+     */
+    public static Intent registerReceiverCompat(
+            Context context,
+            BroadcastReceiver receiver,
+            IntentFilter filter,
+            int flags
+    ) {
+        if (requiresReceiverFlags(android.os.Build.VERSION.SDK_INT)) {
+            return context.registerReceiver(receiver, filter, flags);
+        }
+        return context.registerReceiver(receiver, filter);
+    }
 
     enum HiddenApiExemptionOutcome {
         UNSUPPORTED,

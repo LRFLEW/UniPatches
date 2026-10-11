@@ -30,6 +30,10 @@ private val frameworkContextOwners = setOf(
 )
 
 private const val INTENT_FILTER = "Landroid/content/IntentFilter;"
+// Narrow Playhaven SDK fingerprint; it is reusable across apps embedding this class, not tied to an app package.
+private const val PLAYHAVEN_CONTENT_VIEW_CLASS = "Lcom/playhaven/src/publishersdk/content/PHContentView;"
+internal const val PLAYHAVEN_CONTENT_VIEW_EVENT_ACTION = "com.playhaven.src.publishersdk.content.PHContentViewEvent"
+internal const val PLAYHAVEN_PURCHASE_CALLBACK_PREFIX = "com.playhaven.src.publishersdk.content.PHContentViewPurchaseCallback"
 
 private fun invokeRegisters(instruction: ReferenceInstruction, expectedCount: Int): List<Int>? = when (instruction) {
     is BuilderInstruction35c -> if (instruction.registerCount == expectedCount) {
@@ -50,6 +54,17 @@ private fun invokeRegisters(instruction: ReferenceInstruction, expectedCount: In
 }
 
 internal fun appWideReceiverCallRegisters(instruction: ReferenceInstruction): List<Int>? = invokeRegisters(instruction, 3)
+
+internal fun appWideReceiverCompatBlock(registers: List<Int>, flags: Int, scratchBase: Int): String? {
+    if (registers.size != 3 || registers.any { it < 0 } || scratchBase < 0 || scratchBase + 3 > 255) return null
+    return """
+        move-object/from16 v$scratchBase, v${registers[0]}
+        move-object/from16 v${scratchBase + 1}, v${registers[1]}
+        move-object/from16 v${scratchBase + 2}, v${registers[2]}
+        const/16 v${scratchBase + 3}, $flags
+        invoke-static/range {v$scratchBase .. v${scratchBase + 3}}, Lunipatch/compatcore/LegacyCompatRuntime;->registerReceiverCompat(Landroid/content/Context;Landroid/content/BroadcastReceiver;Landroid/content/IntentFilter;I)Landroid/content/Intent;
+    """.trimIndent()
+}
 
 private fun writesRegister(instruction: com.android.tools.smali.dexlib2.iface.instruction.Instruction, register: Int): Boolean = when (instruction) {
     is ThreeRegisterInstruction -> instruction.registerA == register
@@ -129,11 +144,34 @@ internal fun resolvedReceiverFilterActions(
     return null
 }
 
+internal fun knownInternalPlayhavenReceiverActions(
+    classType: String,
+    methodName: String,
+    instructions: List<com.android.tools.smali.dexlib2.iface.instruction.Instruction>,
+): Set<String>? {
+    if (classType != PLAYHAVEN_CONTENT_VIEW_CLASS || methodName != "registerPurchaseReceiver") return null
+    val hasPurchasePrefix = instructions.any { instruction ->
+        val reference = (instruction as? ReferenceInstruction)?.reference as? StringReference
+        reference?.string == PLAYHAVEN_PURCHASE_CALLBACK_PREFIX
+    }
+    val stringFilterConstructors = instructions.count { instruction ->
+        val method = ((instruction as? ReferenceInstruction)?.reference as? MethodReference)
+        method?.definingClass == INTENT_FILTER &&
+            method.name == "<init>" &&
+            method.parameterTypes == listOf("Ljava/lang/String;")
+    }
+    return setOf(PLAYHAVEN_PURCHASE_CALLBACK_PREFIX).takeIf { hasPurchasePrefix && stringFilterConstructors == 1 }
+}
+
 internal fun receiverFlagsForActions(actions: Set<String>?, applicationId: String?): Int? {
     if (actions.isNullOrEmpty() || applicationId.isNullOrBlank()) return null
     val flags = actions.map { action ->
         when {
-            action == applicationId || action.startsWith("$applicationId.") || action.startsWith("org.onepf.openiab.") -> RECEIVER_NOT_EXPORTED
+            action == applicationId ||
+                action.startsWith("$applicationId.") ||
+                action.startsWith("org.onepf.openiab.") ||
+                action == PLAYHAVEN_CONTENT_VIEW_EVENT_ACTION ||
+                action == PLAYHAVEN_PURCHASE_CALLBACK_PREFIX -> RECEIVER_NOT_EXPORTED
             action.startsWith("android.") ||
                 action == "com.android.vending.INSTALL_REFERRER" ||
                 action.startsWith("com.android.vending.billing.") ||
@@ -241,6 +279,11 @@ internal fun legacyReceiverFlagsPatch(enabledProvider: () -> Boolean) = bytecode
                     return@mapNotNull null
                 }
                 val actions = resolvedReceiverFilterActions(immutableInstructions, index, registers[2])
+                    ?: if (candidateCalls.size == 1) {
+                        knownInternalPlayhavenReceiverActions(classDef.type, method.name, immutableInstructions)
+                    } else {
+                        null
+                    }
                 val flags = receiverFlagsForActions(actions, StartupHooks.resolvedPackageName)
                 if (flags == null) {
                     skipped++
@@ -255,43 +298,26 @@ internal fun legacyReceiverFlagsPatch(enabledProvider: () -> Boolean) = bytecode
                 ClassifiedCall(index, instruction, registers, requireNotNull(actions), flags)
             }
             if (classifiedCalls.isEmpty()) continue
-            val calls = classifiedCalls.map { it.index to it.instruction }
-
             val originalRegisterCount = implementation.registerCount
             val scratchBase = originalRegisterCount
-            if (scratchBase + 5 > 15) {
+            if (scratchBase + 3 > 255) {
                 skipped += classifiedCalls.size
-                logger.info(receiverSkipDiagnostic(classDef.type, method.name, "scratch registers cannot fit the branch-safe v0..v15 range."))
+                logger.info(receiverSkipDiagnostic(classDef.type, method.name, "temporary register range exceeds the const/16 encoding limit."))
                 continue
             }
 
-            val cloned = method.cloneMutable(additionalRegisters = 6)
+            val cloned = method.cloneMutable(additionalRegisters = 4)
             val prologueSize = cloned.implementation!!.instructions.size - immutableInstructions.size
             var privateCallCount = 0
             var exportedCallCount = 0
-            for ((ordinal, call) in classifiedCalls.asReversed().withIndex()) {
-                val index = call.index + prologueSize
-                val registers = call.registers
-                val oldOwner = ((call.instruction as? ReferenceInstruction)?.reference as? MethodReference)?.definingClass
-                    ?: "Landroid/content/Context;"
-                val oldReference = "$oldOwner->registerReceiver(Landroid/content/BroadcastReceiver;Landroid/content/IntentFilter;)Landroid/content/Intent;"
-                val oldLabel = ":morphe_legacy_receiver_old_${ordinal}"
-                val doneLabel = ":morphe_legacy_receiver_done_${ordinal}"
-                val block = """
-                    move-object/from16 v$scratchBase, v${registers[0]}
-                    move-object/from16 v${scratchBase + 1}, v${registers[1]}
-                    move-object/from16 v${scratchBase + 2}, v${registers[2]}
-                    sget v${scratchBase + 5}, Landroid/os/Build${'$'}VERSION;->SDK_INT:I
-                    const/16 v${scratchBase + 4}, $RECEIVER_FLAGS_API
-                    if-lt v${scratchBase + 5}, v${scratchBase + 4}, $oldLabel
-                    const/16 v${scratchBase + 3}, ${call.flags}
-                    invoke-virtual/range {v$scratchBase .. v${scratchBase + 3}}, Landroid/content/Context;->registerReceiver(Landroid/content/BroadcastReceiver;Landroid/content/IntentFilter;I)Landroid/content/Intent;
-                    goto $doneLabel
-                    $oldLabel
-                    invoke-virtual/range {v$scratchBase .. v${scratchBase + 2}}, $oldReference
-                    $doneLabel
-                """.trimIndent()
-                cloned.replaceInstruction(index, block)
+            for (call in classifiedCalls.asReversed()) {
+                val block = appWideReceiverCompatBlock(call.registers, call.flags, scratchBase)
+                if (block == null) {
+                    skipped++
+                    logger.info(receiverSkipDiagnostic(classDef.type, method.name, "receiver helper register range could not be encoded safely."))
+                    continue
+                }
+                cloned.replaceInstruction(call.index + prologueSize, block)
                 patched++
                 if (call.flags == RECEIVER_EXPORTED) exportedCallCount++ else privateCallCount++
                 val selectedFlag = if (call.flags == RECEIVER_EXPORTED) "RECEIVER_EXPORTED" else "RECEIVER_NOT_EXPORTED"

@@ -56,6 +56,18 @@ class LegacyAppCompatibilityPendingIntentsTest {
     }
 
     @Test
+    fun googleExpansionDownloaderPendingIntentTargetsStayExact() {
+        assertEquals(
+            listOf(
+                "Lcom/google/android/vending/expansion/downloader_impl/DownloaderActivity;" to "finishOnCreate",
+                "Lcom/google/android/vending/expansion/downloader_impl/DownloaderActivity\$UnpackingNotificationListener;" to "<init>",
+            ),
+            downloaderPendingIntentTargets.map { it.classType to it.methodName },
+        )
+        assertEquals(listOf("Lcom/google/android/vending/expansion/downloader_impl/DownloaderActivity;", "I", "I"), downloaderPendingIntentTargets[1].parameterTypes)
+    }
+
+    @Test
     fun apkpureLicenseCheckerActionFixtureMatchesAndFailsClosedOnDrift() {
         val originalAction = BuilderInstruction21c(
             Opcode.CONST_STRING,

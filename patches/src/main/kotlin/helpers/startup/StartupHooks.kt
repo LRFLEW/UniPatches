@@ -29,6 +29,9 @@ internal object StartupHooks {
     /** Package name read from the manifest for narrow app-specific patch targeting. */
     var resolvedPackageName: String? = null
 
+    /** Original manifest version code used to validate expansion OBB identity. */
+    var resolvedVersionCode: String? = null
+
     /**
      * Launcher activity descriptor resolved from the manifest's MAIN/LAUNCHER
      * intent filter (e.g. `Lcom/peacock/flashlight/pages/splash/SplashActivity;`).
@@ -54,6 +57,9 @@ internal object StartupHooks {
                 document("AndroidManifest.xml").use { doc ->
                     val application = doc.documentElement.applicationOrNull()
                     resolvedPackageName = doc.documentElement.getAttribute("package").ifEmpty { null }
+                    resolvedVersionCode = doc.documentElement.getAttributeNS(NS_ANDROID, "versionCode")
+                        .ifEmpty { doc.documentElement.getAttribute("android:versionCode") }
+                        .ifBlank { null }
                     val appName = application?.getAttributeNS(NS_ANDROID, "name")
                         ?.ifEmpty { application.getAttribute("android:name") }
                         .orEmpty()
@@ -67,7 +73,7 @@ internal object StartupHooks {
                     resolvedNoHistoryActivityDescriptors = findNoHistoryActivities(doc.documentElement)
                     overlayApplicationBridgeOwner = null
                     println(
-                        "Universal Overlay startup resolution: package=$resolvedPackageName " +
+                        "Universal Overlay startup resolution: package=$resolvedPackageName versionCode=$resolvedVersionCode " +
                             "application=$resolvedApplicationDescriptor " +
                             "launcher=$resolvedLauncherActivityDescriptor " +
                             "noHistory=${resolvedNoHistoryActivityDescriptors.size}",
@@ -76,6 +82,7 @@ internal object StartupHooks {
             } catch (error: Exception) {
                 resolvedApplicationDescriptor = null
                 resolvedPackageName = null
+                resolvedVersionCode = null
                 resolvedLauncherActivityDescriptor = null
                 resolvedNoHistoryActivityDescriptors = emptySet()
                 overlayApplicationBridgeOwner = null
