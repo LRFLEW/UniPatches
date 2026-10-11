@@ -124,26 +124,78 @@ internal fun addLegacyReviver(document: Document, apache: Boolean, foreground: B
     return changed
 }
 
-/** Returns the original targetSdkVersion from the manifest, or null when absent. */
-internal fun originalTargetSdk(document: Document): Int? =
-    (document.getElementsByTagName("uses-sdk").item(0) as? Element)
+/** Returns the explicitly declared targetSdkVersion text, or null when absent. */
+private fun originalTargetSdkValue(document: Document): String? =
+    document.documentElement
+        ?.childElements()
+        ?.firstOrNull { it.manifestLocalName() == "uses-sdk" }
+        ?.takeIf { it.hasAttributeNS(NS_ANDROID, "targetSdkVersion") }
         ?.getAttributeNS(NS_ANDROID, "targetSdkVersion")
-        ?.takeIf { it.isNotEmpty() }
-        ?.toIntOrNull()
+
+/** Returns the original targetSdkVersion from the manifest, or null when absent or invalid. */
+internal fun originalTargetSdk(document: Document): Int? = originalTargetSdkValue(document)?.toIntOrNull()
 
 internal fun updateTargetSdk(document: Document, target: Int): Boolean {
     val root = document.documentElement ?: return false
-    if (root.tagName != "manifest") return false
-    val usesSdk = root.getElementsByTagName("uses-sdk").item(0) as? Element
+    if (root.manifestLocalName() != "manifest") return false
+    val usesSdk = root.childElements().firstOrNull { it.manifestLocalName() == "uses-sdk" }
     if (usesSdk != null) {
         if (usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion") == target.toString()) return false
         usesSdk.setAttributeNS(NS_ANDROID, "android:targetSdkVersion", target.toString())
         return true
     }
-    val created = document.createElement("uses-sdk")
+    val created = createManifestChild(document, root, "uses-sdk")
     created.setAttributeNS(NS_ANDROID, "android:targetSdkVersion", target.toString())
-    root.insertBefore(created, root.applicationOrNull())
+    val application = root.childElements().firstOrNull { it.manifestLocalName() == "application" }
+    root.insertBefore(created, application)
     return true
+}
+
+internal enum class LegacyTargetSdkOutcome {
+    DISABLED,
+    AUTOMATIC_PRESERVED,
+    OUT_OF_RANGE,
+    ALREADY_CURRENT,
+    UPDATED,
+}
+
+internal data class LegacyTargetSdkUpdateResult(
+    val originalTarget: Int?,
+    val selectedTarget: Int?,
+    val finalTarget: Int?,
+    val outcome: LegacyTargetSdkOutcome,
+)
+
+internal fun applyLegacyTargetSdk(
+    document: Document,
+    spoofEnabled: Boolean,
+    profile: String?,
+    customTarget: Int?,
+): LegacyTargetSdkUpdateResult {
+    val original = originalTargetSdk(document)
+    if (!spoofEnabled) {
+        return LegacyTargetSdkUpdateResult(original, null, original, LegacyTargetSdkOutcome.DISABLED)
+    }
+
+    val selected = selectLegacyTargetSdk(original, profile, customTarget ?: 34)
+    if (profile == TARGET_PROFILE_AUTOMATIC && original != null) {
+        return LegacyTargetSdkUpdateResult(original, selected, original, LegacyTargetSdkOutcome.AUTOMATIC_PRESERVED)
+    }
+    if (selected !in 23..40) {
+        return LegacyTargetSdkUpdateResult(original, selected, original, LegacyTargetSdkOutcome.OUT_OF_RANGE)
+    }
+
+    val changed = updateTargetSdk(document, selected)
+    val final = originalTargetSdk(document)
+    check(final == selected) {
+        "Legacy compatibility: target SDK readback mismatch; expected " + selected + " but found " + final
+    }
+    return LegacyTargetSdkUpdateResult(
+        original,
+        selected,
+        final,
+        if (changed) LegacyTargetSdkOutcome.UPDATED else LegacyTargetSdkOutcome.ALREADY_CURRENT,
+    )
 }
 
 internal fun supportAllScreens(document: Document): Pair<Int, Boolean> {
@@ -277,18 +329,36 @@ internal fun legacyManifestPreflightFindings(
     )
     val packageName = root.getAttribute("package")
     val findings = mutableListOf<LegacyCompatibilityPreflightFinding>()
-    val originalTarget = originalTargetSdk(document)
-    if (spoofTargetSdk || originalTarget != null) {
-        val proposedTarget = if (spoofTargetSdk) selectLegacyTargetSdk(originalTarget, targetSdkProfile, customTargetSdk ?: 34) else originalTarget
-        findings += LegacyCompatibilityPreflightFinding(
-            pattern = "uses-sdk targetSdkVersion",
-            detected = originalTarget != null,
-            proposal = if (spoofTargetSdk) "set targetSdkVersion to " + proposedTarget else "preserve the APK targetSdkVersion",
-            apiRange = "Android API 23-40 supported by this option",
-            confidence = if (originalTarget == null) "fallback" else "exact manifest attribute",
-            uncertainty = if (originalTarget == null) "original target is absent; fallback changes platform security behavior" else "target changes compatibility behavior and may reduce protections",
-        )
+    val originalTargetValue = originalTargetSdkValue(document)
+    val originalTarget = originalTargetValue?.toIntOrNull()
+    val targetDeclared = originalTargetValue != null
+    val targetInvalid = targetDeclared && originalTarget == null
+    val proposedTarget = if (spoofTargetSdk) {
+        selectLegacyTargetSdk(originalTarget, targetSdkProfile, customTargetSdk ?: 34)
+    } else {
+        originalTarget
     }
+    val automaticPreservesTarget = spoofTargetSdk && targetSdkProfile == TARGET_PROFILE_AUTOMATIC && originalTarget != null
+    findings += LegacyCompatibilityPreflightFinding(
+        pattern = "uses-sdk targetSdkVersion",
+        detected = targetDeclared,
+        proposal = when {
+            automaticPreservesTarget -> "Automatic preserves existing targetSdkVersion $originalTarget; choose an explicit profile to change it"
+            spoofTargetSdk -> "set targetSdkVersion to $proposedTarget"
+            targetDeclared -> "preserve the APK targetSdkVersion"
+            else -> "leave targetSdkVersion unspecified (effective Spoof Target SDK value is disabled)"
+        },
+        apiRange = "Android API 23-40 supported by this option",
+        confidence = if (targetDeclared) "exact manifest attribute" else "exact manifest absence",
+        uncertainty = when {
+            automaticPreservesTarget -> "Automatic preserves the existing target value; it does not apply the custom numeric target"
+            targetInvalid && !spoofTargetSdk -> "original targetSdkVersion is not a valid integer; the attribute is preserved because effective spoofing is disabled"
+            targetInvalid -> "original targetSdkVersion is not a valid integer; selected profile replaces it with target $proposedTarget"
+            !targetDeclared && !spoofTargetSdk -> "manifest has no explicit targetSdkVersion; selected target SDK profile was not applied because effective spoofing is disabled"
+            !targetDeclared -> "original target is absent; fallback changes platform security behavior"
+            else -> "target changes compatibility behavior and may reduce protections"
+        },
+    )
     val missingExported = exportedComponentTags.flatMap { elementsNamed(root, it) }
         .filter { it.hasIntentFilter() && !it.hasAndroidAttribute("exported") }
     if (missingExported.isNotEmpty() || repairExportFlags || exportAllActivityComponents) {
@@ -331,15 +401,29 @@ internal fun legacyManifestPreflightFindings(
     }
     val obbPath = expansionObbPath.orEmpty().trim()
     if (embedExpansionObb || obbPath.isNotEmpty()) {
-        val obb = java.io.File(obbPath)
-        val valid = obb.isFile && obb.canRead() && isExpansionFileForPackage(obb.name, packageName)
+        val manifestVersionCode = root.getAttributeNS(NS_ANDROID, "versionCode")
+            .ifEmpty { root.getAttribute("android:versionCode") }
+            .ifBlank { null }
+        val validationError = try {
+            validateExpansionObbInput(obbPath, packageName, manifestVersionCode)
+            null
+        } catch (error: IllegalArgumentException) {
+            error.message ?: "Legacy compatibility: OBB validation failed."
+        }
+        val valid = validationError == null
+        val obbName = java.io.File(obbPath).name
+        val versionHint = manifestVersionCode?.let { " versionCode $it" }.orEmpty()
         findings += LegacyCompatibilityPreflightFinding(
             pattern = "embedded expansion OBB",
             detected = valid,
-            proposal = if (embedExpansionObb && valid) "embed and stage " + obb.name + " with runtime checksum verification" else "select a readable main/patch OBB matching the APK package",
+            proposal = when {
+                valid && embedExpansionObb -> "embed and stage " + obbName + " with runtime checksum verification"
+                valid -> "OBB input validates; install separately at <external-storage>/Android/obb/$packageName/$obbName"
+                else -> validationError
+            },
             apiRange = "all supported Android versions",
-            confidence = if (valid) "exact path, filename, package, and readability checks" else "uncertain or absent input",
-            uncertainty = "archive contents and device OBB publication are verified in apply/runtime phases",
+            confidence = if (valid) "exact path, filename, package, version code, archive, and entries" else "apply-time OBB validator rejected input",
+            uncertainty = if (valid) "device OBB publication is verified at runtime" else validationError.orEmpty(),
         )
     }
     return findings
@@ -375,19 +459,8 @@ val legacyAppCompatibilityPatch = resourcePatch(
         title = "Legacy App Compatibility > Preset",
         key = "legacyCompatibilityPreset",
         default = LegacyCompatibilityPresets.CUSTOM,
-        description = "Custom (default) uses your individual choices and conservative defaults. Android 7–9 (API 24–28), Android 10 (29), Android 11 (30), Android 12/12L (31–32), Android 13 (33), and Android 14+ (34+) describe the APK's original target era, not your current device. Era profiles keep the original target SDK, repair missing exported flags safely, repair exact receiver calls, and add Apache HTTP/foreground-service/Bluetooth compatibility only for eras before those APIs changed. Unity enables native-library extraction only when exact Unity classes are detected; OpenIAB enables only recognized OpenIAB receiver repair and a scoped Play Store query; Unity + OpenIAB combines both independently detected repairs. Every non-Custom preset overrides all ordinary options and disables trust-all certificates, IMEI spoofing, QUERY_ALL_PACKAGES, export-all, cleartext and hidden-API bypass. Those six choices are dormant outside Custom; ordinary Custom choices need not restore. Presets never embed OBBs, bypass downloaders, lower target SDK, force all receivers exported, or enable uncertain engine mutations.",
-        values = linkedMapOf(
-            "Custom" to "custom",
-            "Android 7–9 origin" to "android_7_9",
-            "Android 10 origin" to "android_10",
-            "Android 11 origin" to "android_11",
-            "Android 12/12L origin" to "android_12",
-            "Android 13 origin" to "android_13",
-            "Android 14+ origin" to "android_14_plus",
-            "Unity" to "unity",
-            "OpenIAB" to "openiab",
-            "Unity + OpenIAB" to "unity_openiab",
-        ),
+        description = "Custom (default) uses your individual choices and conservative defaults. Android 4.x (API 14–20), Android 5–6 (21–23), Android 7–9 (24–28), Android 10 (29), Android 11 (30), Android 12/12L (31–32), Android 13 (33), and Android 14+ (34+) describe the APK's original target era, not your current device. Era profiles keep the original target SDK, repair missing exported flags safely, repair exact receiver calls, and add Apache HTTP/foreground-service/Bluetooth compatibility only for eras before those APIs changed. Unity enables native-library extraction only when exact Unity classes are detected; OpenIAB enables only recognized OpenIAB receiver repair and a scoped Play Store query; Unity + OpenIAB combines both independently detected repairs. Every non-Custom preset overrides all ordinary options and disables trust-all certificates, IMEI spoofing, QUERY_ALL_PACKAGES, export-all, cleartext and hidden-API bypass. Those six choices are dormant outside Custom; ordinary Custom choices need not restore. Presets never embed OBBs, bypass downloaders, lower target SDK, force all receivers exported, or enable uncertain engine mutations.",
+        values = LegacyCompatibilityPresets.options,
     )
 
     val diagnosticsOnlyRaw by booleanOption(
@@ -678,16 +751,24 @@ val legacyAppCompatibilityPatch = resourcePatch(
             presetId, playStorePackageVisibilityRaw, detectedEngines.openIab,
         )
         val obbPathForLog = expansionObbPath.orEmpty().trim()
+        val rawObbPathForLog = expansionObbPathRaw.orEmpty().trim()
         fun optionLogValue(value: Any?): String =
             value?.toString()?.filterNot { Character.isISOControl(it) }?.take(300) ?: "<unset>"
+        fun obbPathLogValue(value: String): String =
+            value.takeIf { it.isNotBlank() }?.substringAfterLast('/')?.let(::optionLogValue) ?: "<not set>"
 
         logger.info(
             buildString {
-                appendLine("Legacy App Compatibility options (selected values):")
+                appendLine("Legacy App Compatibility options (raw and effective values):")
                 appendLine("  patchEnabled=true")
-            appendLine("  diagnosticsOnly=${optionLogValue(diagnosticsOnly)}")
+                appendLine("  rawPreset=${optionLogValue(preset)}")
+                appendLine("  preset=${optionLogValue(presetId)}")
+                appendLine("  diagnosticsOnly=${optionLogValue(diagnosticsOnly)}")
+                appendLine("  rawSpoofTargetSdk=${optionLogValue(spoofTargetSdkRaw)}")
                 appendLine("  spoofTargetSdk=${optionLogValue(spoofTargetSdk)}")
+                appendLine("  rawTargetSdk=${optionLogValue(targetSdkRaw)}")
                 appendLine("  targetSdk=${optionLogValue(targetSdk)}")
+                appendLine("  rawTargetSdkProfile=${optionLogValue(targetSdkProfileRaw)}")
                 appendLine("  targetSdkProfile=${optionLogValue(targetSdkProfile)}")
                 appendLine("  legacyReviver=${optionLogValue(legacyReviver)}")
                 appendLine("  apacheLegacy=${optionLogValue(apacheLegacy)}")
@@ -708,10 +789,15 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 appendLine("  bypassPackageVisibility=${optionLogValue(bypassPackageVisibility)}")
                 appendLine("  manifestCompatAttributes=${optionLogValue(manifestCompatAttributes)}")
                 appendLine("  legacyStorage=${optionLogValue(legacyStorage)}")
-                appendLine("  expansionObbPath=${if (obbPathForLog.isBlank()) "<not set>" else "${optionLogValue(obbPathForLog.substringAfterLast('/'))} (directory redacted)"}")
+                appendLine("  rawExpansionObbPath=${optionLogValue(obbPathLogValue(rawObbPathForLog))} (directory redacted)")
+                appendLine("  expansionObbPath=${optionLogValue(obbPathLogValue(obbPathForLog))} (directory redacted)")
+                appendLine("  rawRelocateExpansionNativeLibraries=${optionLogValue(relocateExpansionNativeLibrariesRaw)}")
                 appendLine("  relocateExpansionNativeLibraries=${optionLogValue(relocateExpansionNativeLibraries)}")
+                appendLine("  rawRemoveRelocatedNativeLibrariesFromObb=${optionLogValue(removeRelocatedNativeLibrariesFromObbRaw)}")
                 appendLine("  removeRelocatedNativeLibrariesFromObb=${optionLogValue(removeRelocatedNativeLibrariesFromObb)}")
+                appendLine("  rawEmbedExpansionObb=${optionLogValue(embedExpansionObbRaw)}")
                 appendLine("  embedExpansionObb=${optionLogValue(embedExpansionObb)}")
+                appendLine("  rawBypassExpansionDownloader=${optionLogValue(bypassExpansionDownloaderRaw)}")
                 appendLine("  bypassExpansionDownloader=${optionLogValue(bypassExpansionDownloader)}")
                 appendLine("  allScreens=${optionLogValue(allScreens)}")
                 appendLine("  extractNativeLibs=${optionLogValue(extractNativeLibs)}")
@@ -720,13 +806,23 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 appendLine("  spoofImei=${optionLogValue(spoofImei)}")
                 appendLine("  imei=<redacted; configured=${imei.orEmpty().trim().isNotEmpty()}>")
                 appendLine("  effectiveTrustCertificates=${trustCertificates == true && acknowledgeTrustCertificates == true}")
+                appendLine("  effectiveRelocateExpansionNativeLibraries=${relocateExpansionNativeLibraries == true && obbPathForLog.isNotBlank()}")
+                appendLine("  effectiveRemoveRelocatedNativeLibrariesFromObb=${removeRelocatedNativeLibrariesFromObb == true && relocateExpansionNativeLibraries == true && embedExpansionObb == true && obbPathForLog.isNotBlank()}")
                 appendLine("  effectiveEmbedExpansionObb=${embedExpansionObb == true && obbPathForLog.isNotBlank()}")
-                appendLine("  effectiveBypassExpansionDownloader=${bypassExpansionDownloader == true && embedExpansionObb == true && obbPathForLog.isNotBlank()}")
+                appendLine("  effectiveBypassExpansionDownloader=${bypassExpansionDownloader == true && embedExpansionObb == true && obbPathForLog.isNotBlank() && detectedEngines.unity}")
             },
         )
 
         if (trustCertificates == true && acknowledgeTrustCertificates != true) {
             logger.warning("Legacy compatibility: Trust All Certificates was requested without the required high-risk acknowledgement; trust-all TLS remains disabled.")
+        }
+        if (spoofTargetSdkRaw == true && spoofTargetSdk != true) {
+            logger.warning("Legacy compatibility: preset $presetId overrides raw Spoof Target SDK=true; target SDK spoofing remains disabled.")
+        }
+        if ((embedExpansionObbRaw == true || bypassExpansionDownloaderRaw == true) &&
+            (embedExpansionObb != true || bypassExpansionDownloader != true)
+        ) {
+            logger.warning("Legacy compatibility: preset $presetId overrides one or more raw expansion options; inspect raw/effective values before expecting OBB handling.")
         }
         fun reportManifestPreflight(manifest: Document) {
             legacyManifestPreflightFindings(
@@ -753,21 +849,21 @@ val legacyAppCompatibilityPatch = resourcePatch(
 
         var changed = 0
         var noApplication = false
+        var targetSdkUpdate: LegacyTargetSdkUpdateResult? = null
         document("AndroidManifest.xml").use { manifest ->
             reportManifestPreflight(manifest)
             noApplication = manifest.documentElement.applicationOrNull() == null
             val originalTarget = originalTargetSdk(manifest)
-            if (spoofTargetSdk == true) {
-                val target = selectLegacyTargetSdk(originalTarget, targetSdkProfile, targetSdk ?: 34)
-                if (target !in 23..40) {
-                    logger.warning("Legacy compatibility: target SDK $target is outside the supported range 23..40.")
-                } else if (updateTargetSdk(manifest, target)) {
-                    changed++
-                    logger.info("Legacy compatibility: target SDK set to $target using profile ${targetSdkProfile ?: TARGET_PROFILE_CUSTOM}.")
-                    if (originalTarget != null && originalTarget > target) {
-                        logger.warning("Legacy compatibility: original target SDK $originalTarget was higher than $target; platform behavior was downgraded to match target SDK $target.")
-                    }
-                }
+            val update = applyLegacyTargetSdk(
+                manifest,
+                spoofEnabled = spoofTargetSdk == true,
+                profile = targetSdkProfile,
+                customTarget = targetSdk,
+            )
+            targetSdkUpdate = update
+            if (update.outcome == LegacyTargetSdkOutcome.UPDATED) changed++
+            if (update.outcome == LegacyTargetSdkOutcome.UPDATED && update.originalTarget != null && update.selectedTarget != null && update.originalTarget > update.selectedTarget) {
+                logger.warning("Legacy compatibility: original target SDK ${update.originalTarget} was higher than ${update.selectedTarget}; platform behavior was downgraded.")
             }
             if (legacyReviver == true) {
                 changed += addLegacyReviver(
@@ -826,11 +922,10 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 }
             }
             if (bypassExpansionDownloader == true && detectedEngines.unity) {
-                if (embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty()) {
-                    changed += moveExpansionDownloaderLauncher(manifest, logger)
-                } else {
-                    logger.warning("Legacy compatibility: expansion downloader bypass requires Embed and stage expansion OBB plus a selected OBB file; launcher unchanged.")
+                require(embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty()) {
+                    "Legacy compatibility: expansion downloader bypass requires OBB embedding and a valid selected OBB file."
                 }
+                changed += moveExpansionDownloaderLauncher(manifest, logger)
             }
             if (allScreens == true) {
                 val (removed, updated) = supportAllScreens(manifest)
@@ -855,6 +950,34 @@ val legacyAppCompatibilityPatch = resourcePatch(
             if (extractNativeLibs == true && (presetId == LegacyCompatibilityPresets.CUSTOM || detectedEngines.unity) && setApplicationAttribute(manifest, "extractNativeLibs", "true")) changed++
             if (disableHeapTagging == true && setApplicationAttribute(manifest, "allowNativeHeapPointerTagging", "false")) changed++
             if (vmSafeMode == true && setApplicationAttribute(manifest, "vmSafeMode", "true")) changed++
+        }
+        targetSdkUpdate?.let { update ->
+            val readback = get("AndroidManifest.xml", false).inputStream().use { input ->
+                document(input).use { parsed -> originalTargetSdk(parsed) }
+            }
+            check(readback == update.finalTarget) {
+                "Legacy compatibility: final target SDK readback mismatch; expected " + update.finalTarget + " but found " + readback
+            }
+            logger.info(
+                "Legacy compatibility: target SDK source=${optionLogValue(update.originalTarget)} selected=${optionLogValue(update.selectedTarget)} final=${optionLogValue(readback)} outcome=${update.outcome} profile=${optionLogValue(targetSdkProfile)} rawSpoof=${optionLogValue(spoofTargetSdkRaw)} effectiveSpoof=${optionLogValue(spoofTargetSdk)}",
+            )
+            when (update.outcome) {
+                LegacyTargetSdkOutcome.AUTOMATIC_PRESERVED -> logger.warning(
+                    "Legacy compatibility: Automatic target profile preserved the original target SDK " + readback + "; select an explicit profile to change it.",
+                )
+                LegacyTargetSdkOutcome.OUT_OF_RANGE -> logger.warning(
+                    "Legacy compatibility: selected target SDK " + update.selectedTarget + " is outside the supported range 23..40; target remains " + readback + ".",
+                )
+                LegacyTargetSdkOutcome.DISABLED -> logger.info(
+                    "Legacy compatibility: target SDK unchanged because effective Spoof Target SDK is disabled.",
+                )
+                LegacyTargetSdkOutcome.ALREADY_CURRENT -> logger.info(
+                    "Legacy compatibility: target SDK already matches selected value " + readback + ".",
+                )
+                LegacyTargetSdkOutcome.UPDATED -> logger.info(
+                    "Legacy compatibility: target SDK updated and read back as " + readback + ".",
+                )
+            }
         }
         if (noApplication) {
             logger.warning("Legacy compatibility: no application element was found. Application-level options were skipped.")

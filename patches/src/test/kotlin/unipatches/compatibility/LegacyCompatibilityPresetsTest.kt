@@ -10,13 +10,23 @@ class LegacyCompatibilityPresetsTest {
     }
     @Test fun presetsDisableEveryExplicitOptIn() {
         for (id in LegacyCompatibilityPresets.ids - "custom") {
-            for (key in listOf("trustCertificates", "acknowledgeTrustCertificates", "spoofImei", "bypassPackageVisibility", "exportAllActivityComponents", "allowCleartext", "bypassHiddenApi"))
+            for (key in listOf("trustCertificates", "acknowledgeTrustCertificates", "spoofImei", "bypassPackageVisibility", "exportAllActivityComponents", "allowCleartext", "bypassHiddenApi", "spoofTargetSdk"))
                 assertFalse("$id/$key", LegacyCompatibilityPresets.boolean(id, key, true)!!)
             assertFalse(LegacyCompatibilityPresets.boolean(id, "embedExpansionObb", true)!!)
         }
     }
+    @Test fun presetDropdownIncludesAndroidFourThroughFourteenOrigins() {
+        assertEquals("custom", LegacyCompatibilityPresets.options.entries.first().value)
+        assertEquals("android_4_x", LegacyCompatibilityPresets.options["Android 4.x origin"])
+        assertEquals("android_5_6", LegacyCompatibilityPresets.options["Android 5–6 origin"])
+        assertEquals("android_7_9", LegacyCompatibilityPresets.options["Android 7–9 origin"])
+        assertEquals(listOf(20, 23, 28, 29, 30, 32, 33, 34), LegacyCompatibilityPresets.eras.values.toList())
+        assertTrue(LegacyCompatibilityPresets.boolean("android_4_x", "legacyReviver", false)!!)
+        assertTrue(LegacyCompatibilityPresets.boolean("android_5_6", "bluetooth", false)!!)
+    }
+
     @Test fun eraMappingDoesNotBlindlyDowngradeTarget() {
-        assertEquals(listOf(28, 29, 30, 32, 33, 34), LegacyCompatibilityPresets.eras.values.toList())
+        assertEquals(listOf(20, 23, 28, 29, 30, 32, 33, 34), LegacyCompatibilityPresets.eras.values.toList())
         assertFalse(LegacyCompatibilityPresets.boolean("android_11", "apacheLegacy", true)!!)
         assertTrue(LegacyCompatibilityPresets.boolean("android_7_9", "apacheLegacy", false)!!)
         assertTrue(LegacyCompatibilityPresets.boolean("android_7_9", "legacyReviver", false)!!)

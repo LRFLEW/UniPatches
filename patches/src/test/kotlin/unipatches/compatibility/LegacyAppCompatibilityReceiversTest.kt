@@ -8,7 +8,9 @@ import com.android.tools.smali.dexlib2.immutable.reference.ImmutableMethodRefere
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableStringReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableTypeReference
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LegacyAppCompatibilityReceiversTest {
@@ -25,36 +27,51 @@ class LegacyAppCompatibilityReceiversTest {
     }
 
     @Test
-    fun scratchRegisterDiagnosticIncludesClassMethodAndReason() {
+    fun oversizedMethodDiagnosticIncludesClassMethodAndReason() {
         assertEquals(
-            "Legacy compatibility: skipped receiver fix in Lexample/Receiver;->onReceive; scratch registers cannot fit the branch-safe v0..v15 range.",
+            "Legacy compatibility: skipped receiver fix in Lexample/Receiver;->onReceive; temporary register range exceeds the const/16 encoding limit.",
             receiverSkipDiagnostic(
                 "Lexample/Receiver;",
                 "onReceive",
-                "scratch registers cannot fit the branch-safe v0..v15 range.",
+                "temporary register range exceeds the const/16 encoding limit.",
             ),
         )
+    }
+
+    @Test
+    fun highRegisterCallUsesCompatHelperRangeInvokeWithoutInlineBranch() {
+        val block = requireNotNull(appWideReceiverCompatBlock(listOf(18, 19, 20), RECEIVER_EXPORTED, scratchBase = 30))
+
+        assertTrue(block.contains("move-object/from16 v30, v18"))
+        assertTrue(block.contains("const/16 v33, $RECEIVER_EXPORTED"))
+        assertTrue(block.contains("invoke-static/range {v30 .. v33}, Lunipatch/compatcore/LegacyCompatRuntime;->registerReceiverCompat"))
+        assertFalse(block.contains("if-lt"))
+    }
+
+    @Test
+    fun receiverCompatHelperRejectsUnencodableTemporaryRegisters() {
+        assertNull(appWideReceiverCompatBlock(listOf(18, 19, 20), RECEIVER_EXPORTED, scratchBase = 253))
     }
 
     @Test
     fun appScopedActionsUsePrivateFlag() {
         assertEquals(
             RECEIVER_NOT_EXPORTED,
-            receiverFlagsForActions(setOf("com.glu.gunbros2.action.STATE"), "com.glu.gunbros2"),
+            receiverFlagsForActions(setOf("com.example.legacy.action.STATE"), "com.example.legacy"),
         )
     }
 
     @Test
     fun systemAndKnownExternalActionsUseExportedFlag() {
-        assertEquals(RECEIVER_EXPORTED, receiverFlagsForActions(setOf("android.intent.action.SCREEN_ON"), "com.glu.gunbros2"))
-        assertEquals(RECEIVER_EXPORTED, receiverFlagsForActions(setOf("com.amazon.device.ads.ACTION"), "com.glu.gunbros2"))
+        assertEquals(RECEIVER_EXPORTED, receiverFlagsForActions(setOf("android.intent.action.SCREEN_ON"), "com.example.legacy"))
+        assertEquals(RECEIVER_EXPORTED, receiverFlagsForActions(setOf("com.amazon.device.ads.ACTION"), "com.example.legacy"))
     }
 
     @Test
     fun vendorNamespaceCollisionsFailClosed() {
-        assertNull(receiverFlagsForActions(setOf("com.amazon.internal.refresh"), "com.glu.gunbros2"))
-        assertNull(receiverFlagsForActions(setOf("com.android.internal.refresh"), "com.glu.gunbros2"))
-        assertNull(receiverFlagsForActions(setOf("com.google.android.internal.refresh"), "com.glu.gunbros2"))
+        assertNull(receiverFlagsForActions(setOf("com.amazon.internal.refresh"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.android.internal.refresh"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.google.android.internal.refresh"), "com.example.legacy"))
     }
 
     @Test
@@ -62,8 +79,8 @@ class LegacyAppCompatibilityReceiversTest {
         assertEquals(
             RECEIVER_EXPORTED,
             receiverFlagsForActions(
-                setOf("com.glu.gunbros2.action.STATE", "android.intent.action.SCREEN_ON"),
-                "com.glu.gunbros2",
+                setOf("com.example.legacy.action.STATE", "android.intent.action.SCREEN_ON"),
+                "com.example.legacy",
             ),
         )
     }
@@ -119,8 +136,45 @@ class LegacyAppCompatibilityReceiversTest {
     }
 
     @Test
-    fun unknownActionNamespacesAndMissingPackageFailClosed() {
-        assertNull(receiverFlagsForActions(setOf("com.unclassified.sdk.ACTION"), "com.glu.gunbros2"))
-        assertNull(receiverFlagsForActions(setOf("com.glu.gunbros2.action.INTERNAL"), null))
+    fun playhavenContentEventAndPurchaseCallbackAreAppPrivate() {
+        assertEquals(
+            RECEIVER_NOT_EXPORTED,
+            receiverFlagsForActions(setOf("com.playhaven.src.publishersdk.content.PHContentViewEvent"), "com.example.legacy"),
+        )
+        assertEquals(
+            RECEIVER_NOT_EXPORTED,
+            receiverFlagsForActions(setOf("com.playhaven.src.publishersdk.content.PHContentViewPurchaseCallback"), "com.example.legacy"),
+        )
+    }
+
+    @Test
+    fun exactPlayhavenPurchaseReceiverFingerprintResolvesOnlyItsKnownPrefix() {
+        val prefix = "com.playhaven.src.publishersdk.content.PHContentViewPurchaseCallback"
+        val stringConstructor = ImmutableMethodReference(
+            "Landroid/content/IntentFilter;",
+            "<init>",
+            listOf("Ljava/lang/String;"),
+            "V",
+        )
+        val instructions = listOf(
+            BuilderInstruction21c(Opcode.CONST_STRING, 1, ImmutableStringReference(prefix)),
+            BuilderInstruction21c(Opcode.NEW_INSTANCE, 2, ImmutableTypeReference("Landroid/content/IntentFilter;")),
+            BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, 2, 1, 0, 0, 0, stringConstructor),
+        )
+
+        val actions = knownInternalPlayhavenReceiverActions(
+            "Lcom/playhaven/src/publishersdk/content/PHContentView;",
+            "registerPurchaseReceiver",
+            instructions,
+        )
+        assertEquals(setOf(prefix), actions)
+        assertNull(knownInternalPlayhavenReceiverActions("Lexample/Other;", "registerPurchaseReceiver", instructions))
+    }
+
+    @Test
+    fun uncertainVendorActionsRemainFailClosed() {
+        assertNull(receiverFlagsForActions(setOf("OPT_IN_STATUS_BROADCAST"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.unclassified.sdk.ACTION"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.example.legacy.action.INTERNAL"), null))
     }
 }

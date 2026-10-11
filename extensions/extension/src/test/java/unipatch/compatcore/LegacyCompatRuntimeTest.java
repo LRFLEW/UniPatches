@@ -30,6 +30,25 @@ public class LegacyCompatRuntimeTest {
     }
 
     @Test
+    public void receiverCompatibilityEntryPointIsAvailable() throws Exception {
+        Method entryPoint = LegacyCompatRuntime.class.getMethod(
+                "registerReceiverCompat",
+                android.content.Context.class,
+                android.content.BroadcastReceiver.class,
+                android.content.IntentFilter.class,
+                int.class
+        );
+        assertNotNull(entryPoint);
+    }
+
+    @Test
+    public void receiverFlagsAreUsedStartingAtAndroidT() {
+        assertFalse(LegacyCompatRuntime.requiresReceiverFlags(32));
+        assertTrue(LegacyCompatRuntime.requiresReceiverFlags(33));
+        assertTrue(LegacyCompatRuntime.requiresReceiverFlags(37));
+    }
+
+    @Test
     public void hiddenApiExemptionsAreSkippedBeforeAndroidP() throws Throwable {
         LegacyCompatRuntime.HiddenApiExemptionOnce once = new LegacyCompatRuntime.HiddenApiExemptionOnce();
         final int[] calls = {0};

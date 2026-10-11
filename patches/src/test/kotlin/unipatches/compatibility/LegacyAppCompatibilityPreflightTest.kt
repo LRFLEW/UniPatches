@@ -38,6 +38,160 @@ class LegacyAppCompatibilityPreflightTest {
     }
 
     @Test
+    fun missingTargetSdkIsReportedWhenSpoofingIsDisabled() {
+        val manifest = newDocument().apply { appendChild(createElement("manifest")) }
+
+        val finding = legacyManifestPreflightFindings(
+            document = manifest,
+            spoofTargetSdk = false,
+            targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
+            customTargetSdk = 34,
+            repairExportFlags = false,
+            exportAllActivityComponents = false,
+            playStorePackageVisibility = false,
+            bypassPackageVisibility = false,
+            embedExpansionObb = false,
+            expansionObbPath = null,
+        ).single { it.pattern == "uses-sdk targetSdkVersion" }
+
+        assertFalse(finding.detected)
+        assertTrue(finding.proposal.contains("effective Spoof Target SDK value is disabled"))
+        assertTrue(finding.uncertainty.contains("effective spoofing is disabled"))
+    }
+
+    @Test
+    fun automaticTargetSdkProfileReportsPreservationOfExistingTarget() {
+        val document = newDocument()
+        val manifest = document.createElement("manifest")
+        val usesSdk = document.createElement("uses-sdk").apply {
+            setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "16")
+        }
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
+
+        val finding = legacyManifestPreflightFindings(
+            document = document,
+            spoofTargetSdk = true,
+            targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
+            customTargetSdk = 34,
+            repairExportFlags = false,
+            exportAllActivityComponents = false,
+            playStorePackageVisibility = false,
+            bypassPackageVisibility = false,
+            embedExpansionObb = false,
+            expansionObbPath = null,
+        ).single { it.pattern == "uses-sdk targetSdkVersion" }
+
+        assertTrue(finding.proposal.contains("Automatic preserves existing targetSdkVersion 16"))
+    }
+
+    @Test
+    fun malformedTargetSdkIsReportedAndOnlyReplacedWhenSpoofingIsEnabled() {
+        val document = newDocument()
+        val manifest = document.createElement("manifest")
+        val usesSdk = document.createElement("uses-sdk").apply {
+            setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "not-a-number")
+        }
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
+
+        fun targetFinding(spoof: Boolean) = legacyManifestPreflightFindings(
+            document = document,
+            spoofTargetSdk = spoof,
+            targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
+            customTargetSdk = 34,
+            repairExportFlags = false,
+            exportAllActivityComponents = false,
+            playStorePackageVisibility = false,
+            bypassPackageVisibility = false,
+            embedExpansionObb = false,
+            expansionObbPath = null,
+        ).single { it.pattern == "uses-sdk targetSdkVersion" }
+
+        val disabled = targetFinding(spoof = false)
+        assertTrue(disabled.detected)
+        assertTrue(disabled.uncertainty.contains("not a valid integer"))
+        assertTrue(disabled.uncertainty.contains("preserved"))
+
+        val enabled = targetFinding(spoof = true)
+        assertTrue(enabled.proposal.contains("set targetSdkVersion to 27"))
+        assertTrue(enabled.uncertainty.contains("not a valid integer"))
+        assertEquals("not-a-number", usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion"))
+    }
+
+    @Test
+    fun obbPreflightRequiresPackageAndManifestVersionCodeMatch() {
+        val directory = java.nio.file.Files.createTempDirectory("legacy-obb-preflight-").toFile()
+        val correct = java.io.File(directory, "main.123.com.glu.gunbros2.obb")
+        val wrongVersion = java.io.File(directory, "main.122.com.glu.gunbros2.obb")
+        writeTestObb(correct)
+        writeTestObb(wrongVersion)
+        val document = newDocument()
+        val manifest = document.createElement("manifest").apply {
+            setAttribute("package", "com.glu.gunbros2")
+            setAttributeNS(NS_ANDROID, "android:versionCode", "123")
+        }
+        document.appendChild(manifest)
+        try {
+            fun finding(path: String) = legacyManifestPreflightFindings(
+                document = document,
+                spoofTargetSdk = false,
+                targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
+                customTargetSdk = 34,
+                repairExportFlags = false,
+                exportAllActivityComponents = false,
+                playStorePackageVisibility = false,
+                bypassPackageVisibility = false,
+                embedExpansionObb = true,
+                expansionObbPath = path,
+            ).single { it.pattern == "embedded expansion OBB" }
+
+            assertTrue(finding(correct.path).detected)
+            assertFalse(finding(wrongVersion.path).detected)
+            assertTrue(finding(wrongVersion.path).proposal.contains("versionCode 123"))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun obbPreflightRejectsMalformedAndEmptyArchives() {
+        val directory = java.nio.file.Files.createTempDirectory("legacy-obb-invalid-preflight-").toFile()
+        val malformed = java.io.File(directory, "main.123.com.glu.gunbros2.obb").apply { writeText("not a zip") }
+        val empty = java.io.File(directory, "patch.123.com.glu.gunbros2.obb")
+        writeTestObb(empty, includeEntry = false)
+        val document = newDocument()
+        val manifest = document.createElement("manifest").apply {
+            setAttribute("package", "com.glu.gunbros2")
+            setAttributeNS(NS_ANDROID, "android:versionCode", "123")
+        }
+        document.appendChild(manifest)
+        try {
+            fun finding(path: String) = legacyManifestPreflightFindings(
+                document = document,
+                spoofTargetSdk = false,
+                targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
+                customTargetSdk = 34,
+                repairExportFlags = false,
+                exportAllActivityComponents = false,
+                playStorePackageVisibility = false,
+                bypassPackageVisibility = false,
+                embedExpansionObb = true,
+                expansionObbPath = path,
+            ).single { it.pattern == "embedded expansion OBB" }
+
+            val malformedFinding = finding(malformed.path)
+            assertFalse(malformedFinding.detected)
+            assertTrue(malformedFinding.proposal.contains("not a readable ZIP archive"))
+            val emptyFinding = finding(empty.path)
+            assertFalse(emptyFinding.detected)
+            assertTrue(emptyFinding.proposal.contains("contains no entries"))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun manifestPreflightReportsFindingsWithoutEditingTheDocument() {
         val document = newDocument()
         val manifest = document.createElement("manifest")
@@ -68,6 +222,16 @@ class LegacyAppCompatibilityPreflightTest {
         assertTrue(findings.any { it.pattern == "Google Play package visibility" && !it.detected })
         assertFalse(service.hasAndroidAttribute("exported"))
         assertEquals(0, manifest.childElementsForTest("queries"))
+    }
+
+    private fun writeTestObb(file: java.io.File, includeEntry: Boolean = true) {
+        java.util.zip.ZipOutputStream(file.outputStream()).use { zip ->
+            if (includeEntry) {
+                zip.putNextEntry(java.util.zip.ZipEntry("assets/bin/Data/main.dat"))
+                zip.write("fixture".toByteArray())
+                zip.closeEntry()
+            }
+        }
     }
 
     private fun org.w3c.dom.Element.childElementsForTest(name: String): Int =
