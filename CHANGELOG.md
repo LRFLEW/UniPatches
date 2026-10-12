@@ -1,3 +1,9 @@
+## [1.31.2](https://github.com/Zanuaimi/UniPatches/compare/v1.31.1...v1.31.2) (2026-10-12)
+
+### 🔧 Improvements
+
+* remove duplicate target SDK spoof flag ([9602682](https://github.com/Zanuaimi/UniPatches/commit/960268259a5f2690a4d4ca903ade9263b6951e5f))
+
 ## [1.31.2-dev.1](https://github.com/Zanuaimi/UniPatches/compare/v1.31.1...v1.31.2-dev.1) (2026-10-12)
 
 ### 🔧 Improvements
