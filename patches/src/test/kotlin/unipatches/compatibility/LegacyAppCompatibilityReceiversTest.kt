@@ -70,6 +70,11 @@ class LegacyAppCompatibilityReceiversTest {
     @Test
     fun vendorNamespaceCollisionsFailClosed() {
         assertNull(receiverFlagsForActions(setOf("com.amazon.internal.refresh"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.amazon.device.ads.internal.refresh"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.amazon.inapp.purchasing.internal.refresh"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.android.vending.internal.refresh"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.android.vending.billing.internal.refresh"), "com.example.legacy"))
+        assertNull(receiverFlagsForActions(setOf("com.google.android.c2dm.intent.internal.refresh"), "com.example.legacy"))
         assertNull(receiverFlagsForActions(setOf("com.android.internal.refresh"), "com.example.legacy"))
         assertNull(receiverFlagsForActions(setOf("com.google.android.internal.refresh"), "com.example.legacy"))
     }

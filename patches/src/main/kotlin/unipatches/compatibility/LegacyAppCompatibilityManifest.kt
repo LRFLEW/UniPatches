@@ -125,12 +125,21 @@ internal fun addLegacyReviver(document: Document, apache: Boolean, foreground: B
 }
 
 /** Returns the explicitly declared targetSdkVersion text, or null when absent. */
-private fun originalTargetSdkValue(document: Document): String? =
-    document.documentElement
+private fun originalTargetSdkValue(document: Document): String? {
+    val usesSdk = document.documentElement
         ?.childElements()
         ?.firstOrNull { it.manifestLocalName() == "uses-sdk" }
-        ?.takeIf { it.hasAttributeNS(NS_ANDROID, "targetSdkVersion") }
-        ?.getAttributeNS(NS_ANDROID, "targetSdkVersion")
+        ?: return null
+    return when {
+        usesSdk.hasAttributeNS(NS_ANDROID, "targetSdkVersion") ->
+            usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion")
+        usesSdk.hasAttribute("android:targetSdkVersion") ->
+            usesSdk.getAttribute("android:targetSdkVersion")
+        usesSdk.hasAttribute("targetSdkVersion") ->
+            usesSdk.getAttribute("targetSdkVersion")
+        else -> null
+    }
+}
 
 /** Returns the original targetSdkVersion from the manifest, or null when absent or invalid. */
 internal fun originalTargetSdk(document: Document): Int? = originalTargetSdkValue(document)?.toIntOrNull()
@@ -140,8 +149,17 @@ internal fun updateTargetSdk(document: Document, target: Int): Boolean {
     if (root.manifestLocalName() != "manifest") return false
     val usesSdk = root.childElements().firstOrNull { it.manifestLocalName() == "uses-sdk" }
     if (usesSdk != null) {
-        if (usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion") == target.toString()) return false
-        usesSdk.setAttributeNS(NS_ANDROID, "android:targetSdkVersion", target.toString())
+        val current = originalTargetSdkValue(document)
+        if (current == target.toString()) return false
+        if (usesSdk.hasAttributeNS(NS_ANDROID, "targetSdkVersion")) {
+            usesSdk.setAttributeNS(NS_ANDROID, "android:targetSdkVersion", target.toString())
+        } else if (usesSdk.hasAttribute("android:targetSdkVersion")) {
+            usesSdk.setAttribute("android:targetSdkVersion", target.toString())
+        } else if (usesSdk.hasAttribute("targetSdkVersion")) {
+            usesSdk.setAttribute("targetSdkVersion", target.toString())
+        } else {
+            usesSdk.setAttributeNS(NS_ANDROID, "android:targetSdkVersion", target.toString())
+        }
         return true
     }
     val created = createManifestChild(document, root, "uses-sdk")
@@ -275,6 +293,9 @@ internal fun Element.isLauncherComponent(): Boolean = intentFilters().any { filt
     hasMainAction && hasLauncherCategory
 }
 
+internal fun shouldRepairMissingExportFlags(enabled: Boolean, targetSdk: Int?): Boolean =
+    enabled && targetSdk != null && targetSdk >= 31
+
 internal fun repairMissingComponentExportFlags(document: Document, logger: Logger): Int {
     val root = document.documentElement ?: return 0
     var repaired = 0
@@ -363,12 +384,15 @@ internal fun legacyManifestPreflightFindings(
         .filter { it.hasIntentFilter() && !it.hasAndroidAttribute("exported") }
     if (missingExported.isNotEmpty() || repairExportFlags || exportAllActivityComponents) {
         val launcherCount = missingExported.count { it.isLauncherComponent() }
+        val repairWillApply = shouldRepairMissingExportFlags(repairExportFlags, proposedTarget)
         findings += LegacyCompatibilityPreflightFinding(
             pattern = "filtered components missing android:exported",
             detected = missingExported.isNotEmpty(),
             proposal = when {
                 exportAllActivityComponents -> "set missing activity/alias flags true; preserve explicit values"
-                repairExportFlags -> "set launcher components true and other filtered components false"
+                repairWillApply -> "set launcher components true and other filtered components false for targetSdkVersion $proposedTarget"
+                repairExportFlags && proposedTarget != null && proposedTarget < 31 -> "skip repair: targetSdkVersion $proposedTarget is below 31, where android:exported is not required"
+                repairExportFlags -> "skip repair: targetSdkVersion is unknown; safe repair is only applied for target 31+"
                 else -> "enable safe missing-export repair only if installation requires it"
             },
             apiRange = "Android 12/API 31+ when targetSdkVersion is 31+",
@@ -478,15 +502,15 @@ val legacyAppCompatibilityPatch = resourcePatch(
     )
     val targetSdkRaw by intOption(
         title = "Legacy App Compatibility > Installation and manifest > Target SDK version",
-        default = 34,
+        default = 24,
         key = "legacyCompatibilityTargetSdk",
-        description = "Choose the target SDK number only when the Custom profile is selected. Android accepts values 23–40 here; other values are rejected. Lower values can restore legacy behavior but may weaken security and privacy protections. Default: 34.",
+        description = "Target SDK used only by the explicit Custom profile. Android accepts values 23–40 here; other values are rejected. Choose 24 when an Android 17 install requires at least API 24. Lower values can restore legacy behavior but may weaken security and privacy protections. Default: 24.",
     )
     val targetSdkProfileRaw by stringOption(
         title = "Legacy App Compatibility > Installation and manifest > Target SDK compatibility profile",
-        default = TARGET_PROFILE_AUTOMATIC,
+        default = "custom",
         key = "legacyCompatibilityTargetSdkProfile",
-        description = "Choose Custom to use the number above; Automatic to keep the APK's existing target (or use 27 if it has none); or fixed target 27/29 profiles for troubleshooting. Prefer Automatic unless you know the app needs another target: changing it alters Android's compatibility rules, and cannot repair broken code.",
+        description = "Custom sets the number above (default 24); Preserve original keeps the APK target unchanged and does not apply that number. Fixed 27/29 profiles are available for troubleshooting. Changing target SDK alters Android compatibility rules and can weaken platform protections; choose the lowest explicit target only when required.",
         values = linkedMapOf(
             "Custom target SDK" to TARGET_PROFILE_CUSTOM,
             "Preserve original target (automatic)" to TARGET_PROFILE_AUTOMATIC,
@@ -757,6 +781,9 @@ val legacyAppCompatibilityPatch = resourcePatch(
         fun obbPathLogValue(value: String): String =
             value.takeIf { it.isNotBlank() }?.substringAfterLast('/')?.let(::optionLogValue) ?: "<not set>"
 
+        if (presetId != LegacyCompatibilityPresets.CUSTOM && spoofTargetSdk != spoofTargetSdkRaw) {
+            logger.info("Legacy compatibility: preset $presetId overrides the saved Spoof Target SDK choice ($spoofTargetSdkRaw) with $spoofTargetSdk.")
+        }
         logger.info(
             buildString {
                 appendLine("Legacy App Compatibility options (raw and effective values):")
@@ -764,7 +791,6 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 appendLine("  rawPreset=${optionLogValue(preset)}")
                 appendLine("  preset=${optionLogValue(presetId)}")
                 appendLine("  diagnosticsOnly=${optionLogValue(diagnosticsOnly)}")
-                appendLine("  rawSpoofTargetSdk=${optionLogValue(spoofTargetSdkRaw)}")
                 appendLine("  spoofTargetSdk=${optionLogValue(spoofTargetSdk)}")
                 appendLine("  rawTargetSdk=${optionLogValue(targetSdkRaw)}")
                 appendLine("  targetSdk=${optionLogValue(targetSdk)}")
@@ -893,7 +919,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
                         logger.info("Legacy compatibility: exported $exported activity component(s).")
                     }
                 }
-                repairExportFlags == true -> {
+                shouldRepairMissingExportFlags(repairExportFlags == true, update.finalTarget) -> {
                     val repaired = repairMissingComponentExportFlags(manifest, logger)
                     changed += repaired
                     if (repaired == 0) {
@@ -901,6 +927,9 @@ val legacyAppCompatibilityPatch = resourcePatch(
                     } else {
                         logger.info("Legacy compatibility: repaired $repaired component exported flag(s).")
                     }
+                }
+                repairExportFlags == true -> {
+                    logger.info("Legacy compatibility: skipped missing-export repair because final targetSdkVersion ${update.finalTarget ?: "unknown"} is below 31 or unavailable; android:exported is required only for target 31+.")
                 }
             }
             if (allowCleartext == true) {
@@ -959,7 +988,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 "Legacy compatibility: final target SDK readback mismatch; expected " + update.finalTarget + " but found " + readback
             }
             logger.info(
-                "Legacy compatibility: target SDK source=${optionLogValue(update.originalTarget)} selected=${optionLogValue(update.selectedTarget)} final=${optionLogValue(readback)} outcome=${update.outcome} profile=${optionLogValue(targetSdkProfile)} rawSpoof=${optionLogValue(spoofTargetSdkRaw)} effectiveSpoof=${optionLogValue(spoofTargetSdk)}",
+                "Legacy compatibility: target SDK source=${optionLogValue(update.originalTarget)} selected=${optionLogValue(update.selectedTarget)} final=${optionLogValue(readback)} outcome=${update.outcome} profile=${optionLogValue(targetSdkProfile)}",
             )
             when (update.outcome) {
                 LegacyTargetSdkOutcome.AUTOMATIC_PRESERVED -> logger.warning(

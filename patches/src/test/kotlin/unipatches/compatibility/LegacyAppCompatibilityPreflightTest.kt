@@ -224,6 +224,35 @@ class LegacyAppCompatibilityPreflightTest {
         assertEquals(0, manifest.childElementsForTest("queries"))
     }
 
+    @Test
+    fun manifestPreflightExplainsWhyMissingExportRepairIsSkippedBelowApi31Target() {
+        val document = newDocument()
+        val manifest = document.createElement("manifest")
+        document.appendChild(manifest)
+        manifest.appendChild(document.createElement("uses-sdk").apply {
+            setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "29")
+        })
+        manifest.appendChild(document.createElement("activity").apply {
+            appendChild(document.createElement("intent-filter"))
+        })
+
+        val finding = legacyManifestPreflightFindings(
+            document = document,
+            spoofTargetSdk = false,
+            targetSdkProfile = TARGET_PROFILE_CUSTOM,
+            customTargetSdk = 24,
+            repairExportFlags = true,
+            exportAllActivityComponents = false,
+            playStorePackageVisibility = false,
+            bypassPackageVisibility = false,
+            embedExpansionObb = false,
+            expansionObbPath = null,
+        ).single { it.pattern == "filtered components missing android:exported" }
+
+        assertTrue(finding.detected)
+        assertTrue(finding.proposal.contains("targetSdkVersion 29 is below 31"))
+    }
+
     private fun writeTestObb(file: java.io.File, includeEntry: Boolean = true) {
         java.util.zip.ZipOutputStream(file.outputStream()).use { zip ->
             if (includeEntry) {

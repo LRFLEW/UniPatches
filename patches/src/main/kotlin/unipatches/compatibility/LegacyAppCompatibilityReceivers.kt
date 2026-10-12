@@ -172,11 +172,7 @@ internal fun receiverFlagsForActions(actions: Set<String>?, applicationId: Strin
                 action.startsWith("org.onepf.openiab.") ||
                 action == PLAYHAVEN_CONTENT_VIEW_EVENT_ACTION ||
                 action == PLAYHAVEN_PURCHASE_CALLBACK_PREFIX -> RECEIVER_NOT_EXPORTED
-            action.startsWith("android.") ||
-                action == "com.android.vending.INSTALL_REFERRER" ||
-                action.startsWith("com.android.vending.billing.") ||
-                action.startsWith("com.google.android.c2dm.intent.") ||
-                isExternalStoreAction(action) -> RECEIVER_EXPORTED
+            isExternalStoreAction(action) -> RECEIVER_EXPORTED
             else -> return null
         }
     }
