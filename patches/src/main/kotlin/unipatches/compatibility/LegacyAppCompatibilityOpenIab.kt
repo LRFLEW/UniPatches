@@ -26,11 +26,10 @@ private val frameworkContextOwners = setOf(
     "Landroid/content/ContextWrapper;",
     "Landroid/app/Activity;",
 )
-private val externalStoreActionPrefixes = listOf(
-    "com.android.vending.",
-    "com.amazon.device.ads.", "com.amazon.inapp.purchasing.",
-    "com.sec.android.iap.", "com.samsung.android.iap.",
-    "com.yandex.store.", "com.nokia.payment.",
+private val knownExportedActions = setOf(
+    "android.intent.action.SCREEN_ON",
+    "com.android.vending.INSTALL_REFERRER",
+    "com.amazon.device.ads.ACTION",
 )
 
 private fun receiverCallRegisters(instruction: ReferenceInstruction): List<Int>? = when (instruction) {
@@ -91,14 +90,11 @@ private fun resolvedOpenIabActions(
     return actions.takeIf { it.isNotEmpty() }
 }
 
-private fun isSafeOpenIabAction(action: String): Boolean {
-    if (action.startsWith("android.")) return true
-    if (action.startsWith("org.onepf.openiab.")) return true
-    return false
-}
+private fun isSafeOpenIabAction(action: String): Boolean =
+    action.startsWith("org.onepf.openiab.")
 
 internal fun isExternalStoreAction(action: String): Boolean =
-    externalStoreActionPrefixes.any(action::startsWith)
+    action in knownExportedActions
 
 private fun receiverFlagsForOpenIabActions(actions: Set<String>): Int? = when {
     actions.isEmpty() -> null

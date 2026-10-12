@@ -49,6 +49,22 @@ class LegacyAppCompatibilityManifestTest {
     }
 
     @Test
+    fun originalTargetSdkReadsLiteralQualifiedAttributeForPreflight() {
+        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument()
+        val manifest = document.createElement("manifest")
+        val usesSdk = document.createElement("uses-sdk").apply {
+            setAttribute("android:targetSdkVersion", "16")
+        }
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
+
+        assertEquals(16, originalTargetSdk(document))
+        assertTrue(updateTargetSdk(document, 24))
+        assertEquals(24, originalTargetSdk(document))
+        assertEquals("24", usesSdk.getAttribute("android:targetSdkVersion"))
+    }
+
+    @Test
     fun originalTargetSdkReturnsNullWhenAbsentOrInvalid() {
         assertNull(originalTargetSdk(newDocument()))
         val document = newDocument()
@@ -90,6 +106,30 @@ class LegacyAppCompatibilityManifestTest {
         assertEquals(34, result.selectedTarget)
         assertEquals(34, result.finalTarget)
         assertEquals(LegacyTargetSdkOutcome.UPDATED, result.outcome)
+    }
+
+    @Test
+    fun customSpoofCheckboxPassesThroughAndAppliesExplicitSdk24() {
+        val enabled = LegacyCompatibilityPresets.boolean(LegacyCompatibilityPresets.CUSTOM, "spoofTargetSdk", true)
+        val document = newDocument()
+        val manifest = document.createElement("manifest")
+        val usesSdk = document.createElement("uses-sdk").apply {
+            setAttributeNS(NS_ANDROID, "android:targetSdkVersion", "16")
+        }
+        manifest.appendChild(usesSdk)
+        document.appendChild(manifest)
+
+        val result = applyLegacyTargetSdk(
+            document,
+            spoofEnabled = enabled == true,
+            profile = TARGET_PROFILE_CUSTOM,
+            customTarget = 24,
+        )
+
+        assertEquals(16, result.originalTarget)
+        assertEquals(24, result.selectedTarget)
+        assertEquals(24, result.finalTarget)
+        assertEquals("24", usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion"))
     }
 
     @Test
@@ -158,6 +198,15 @@ class LegacyAppCompatibilityManifestTest {
         assertEquals("32", permission.getAttributeNS(NS_ANDROID, "maxSdkVersion"))
         assertFalse(addPermission(document, "a.b.C", maxSdkVersion = 32))
         assertEquals(1, permissions.length)
+    }
+
+    @Test
+    fun missingExportRepairIsRequiredOnlyForTargetSdk31AndNewer() {
+        assertFalse(shouldRepairMissingExportFlags(false, 34))
+        assertFalse(shouldRepairMissingExportFlags(true, null))
+        assertFalse(shouldRepairMissingExportFlags(true, 30))
+        assertTrue(shouldRepairMissingExportFlags(true, 31))
+        assertTrue(shouldRepairMissingExportFlags(true, 34))
     }
 
     @Test

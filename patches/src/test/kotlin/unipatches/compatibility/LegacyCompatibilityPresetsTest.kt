@@ -6,6 +6,9 @@ import org.junit.Test
 class LegacyCompatibilityPresetsTest {
     @Test fun customPreservesManualChoices() {
         assertTrue(LegacyCompatibilityPresets.boolean("custom", "allowCleartext", true)!!)
+        assertTrue(LegacyCompatibilityPresets.boolean("custom", "spoofTargetSdk", true)!!)
+        assertFalse(LegacyCompatibilityPresets.boolean("custom", "spoofTargetSdk", false)!!)
+        assertTrue(LegacyCompatibilityPresets.boolean("custom", "embedExpansionObb", true)!!)
         assertEquals(35, LegacyCompatibilityPresets.target("custom", 35))
     }
     @Test fun presetsDisableEveryExplicitOptIn() {
