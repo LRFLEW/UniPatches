@@ -282,6 +282,17 @@ class LegacyAppCompatibilityManifestTest {
         assertEquals("true", alias.androidAttribute("exported"))
         assertEquals("false", service.androidAttribute("exported"))
         assertEquals("false", receiver.androidAttribute("exported"))
+        assertFalse(alias.hasAndroidAttribute("permission"))
+        assertFalse(service.hasAndroidAttribute("permission"))
+    }
+
+    @Test
+    fun missingExportPolicyFailsClosedForUnverifiedReceiverActions() {
+        assertEquals(MissingExportPolicy(true), missingExportPolicy("activity", true))
+        assertEquals(MissingExportPolicy(false), missingExportPolicy("activity", false))
+        assertEquals(MissingExportPolicy(true), missingExportPolicy("activity-alias", true))
+        assertEquals(MissingExportPolicy(false), missingExportPolicy("receiver", false))
+        assertEquals(MissingExportPolicy(false), missingExportPolicy("service", false))
     }
 
     @Test

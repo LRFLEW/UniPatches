@@ -296,6 +296,11 @@ internal fun Element.isLauncherComponent(): Boolean = intentFilters().any { filt
 internal fun shouldRepairMissingExportFlags(enabled: Boolean, targetSdk: Int?): Boolean =
     enabled && targetSdk != null && targetSdk >= 31
 
+internal data class MissingExportPolicy(val exported: Boolean)
+
+internal fun missingExportPolicy(componentTag: String, isLauncher: Boolean): MissingExportPolicy =
+    MissingExportPolicy(componentTag in setOf("activity", "activity-alias") && isLauncher)
+
 internal fun repairMissingComponentExportFlags(document: Document, logger: Logger): Int {
     val root = document.documentElement ?: return 0
     var repaired = 0
@@ -303,10 +308,12 @@ internal fun repairMissingComponentExportFlags(document: Document, logger: Logge
         for (component in elementsNamed(root, tagName)) {
             if (component.hasAndroidAttribute("exported") || !component.hasIntentFilter()) continue
 
-            val exported = component.isLauncherComponent().toString()
-            component.setAttributeNS(NS_ANDROID, "android:exported", exported)
+            val policy = missingExportPolicy(tagName, component.isLauncherComponent())
+            component.setAttributeNS(NS_ANDROID, "android:exported", policy.exported.toString())
             repaired++
-            logger.info("Legacy compatibility: repaired ${component.androidAttribute("name").ifEmpty { "<unnamed>" }} with android:exported=$exported.")
+            logger.info(
+                "Legacy compatibility: repaired ${component.androidAttribute("name").ifEmpty { "<unnamed>" }} with android:exported=${policy.exported}; unverified components fail closed.",
+            )
         }
     }
     return repaired
@@ -745,6 +752,14 @@ val legacyAppCompatibilityPatch = resourcePatch(
     if (shouldApplyLegacyCompatibilityMutations(diagnosticsOnly == true)) {
         dependsOn(legacyImeiPatch { Pair(spoofImei == true, imei.orEmpty().trim()) })
         dependsOn(openIabReceiverFlagsPatch { openIabReceiverRegistrationMode ?: OPEN_IAB_AUTOMATIC })
+        dependsOn(legacyExpansionFilesPatch {
+            LegacyExpansionOptions(
+                obbPath = expansionObbPath.orEmpty().trim(),
+                relocateNativeLibraries = relocateExpansionNativeLibraries == true,
+                embedExpansionObb = embedExpansionObb == true,
+                removeRelocatedNativeLibrariesFromObb = removeRelocatedNativeLibrariesFromObb == true,
+            )
+        })
         dependsOn(legacyRuntimeHooksPatch {
             LegacyRuntimeOptions(
                 hiddenApiExemptions = bypassHiddenApi == true,
@@ -752,14 +767,6 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 storageRedirect = redirectLegacyStorage == true,
                 embeddedExpansionObb = embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty(),
                 expansionDownloaderBypass = bypassExpansionDownloader == true && embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty(),
-            )
-        })
-        dependsOn(legacyExpansionFilesPatch {
-            LegacyExpansionOptions(
-                obbPath = expansionObbPath.orEmpty().trim(),
-                relocateNativeLibraries = relocateExpansionNativeLibraries == true,
-                embedExpansionObb = embedExpansionObb == true,
-                removeRelocatedNativeLibrariesFromObb = removeRelocatedNativeLibrariesFromObb == true,
             )
         })
         dependsOn(legacyReceiverFlagsPatch { receiverFixAppWide == true })
@@ -774,6 +781,13 @@ val legacyAppCompatibilityPatch = resourcePatch(
         val playStorePackageVisibility = LegacyCompatibilityPresets.playStorePackageVisibility(
             presetId, playStorePackageVisibilityRaw, detectedEngines.openIab,
         )
+        val playStoreQueryReason = when {
+            playStorePackageVisibilityRaw != true -> "not requested"
+            presetId == LegacyCompatibilityPresets.CUSTOM -> "explicit Custom selection"
+            detectedEngines.openIab -> "exact OpenIAB engine fingerprint detected"
+            else -> "skipped because exact OpenIAB detection did not match"
+        }
+        val implementationIdentity = LegacyCompatibilityBuildIdentity.current()
         val obbPathForLog = expansionObbPath.orEmpty().trim()
         val rawObbPathForLog = expansionObbPathRaw.orEmpty().trim()
         fun optionLogValue(value: Any?): String =
@@ -790,6 +804,10 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 appendLine("  patchEnabled=true")
                 appendLine("  rawPreset=${optionLogValue(preset)}")
                 appendLine("  preset=${optionLogValue(presetId)}")
+                appendLine("  implementationFingerprintScope=${optionLogValue(implementationIdentity.scope)}")
+                appendLine("  implementationFingerprintSha256=${optionLogValue(implementationIdentity.sha256)}")
+                appendLine("  detectedUnity=${optionLogValue(detectedEngines.unity)}")
+                appendLine("  detectedOpenIab=${optionLogValue(detectedEngines.openIab)}")
                 appendLine("  diagnosticsOnly=${optionLogValue(diagnosticsOnly)}")
                 appendLine("  spoofTargetSdk=${optionLogValue(spoofTargetSdk)}")
                 appendLine("  rawTargetSdk=${optionLogValue(targetSdkRaw)}")
@@ -811,7 +829,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 appendLine("  exportAllActivityComponents=${optionLogValue(exportAllActivityComponents)}")
                 appendLine("  allowCleartext=${optionLogValue(allowCleartext)}")
                 appendLine("  relaxLibraries=${optionLogValue(relaxLibraries)}")
-                appendLine("  playStorePackageVisibility=${optionLogValue(playStorePackageVisibility)}")
+                appendLine("  playStorePackageVisibility=${optionLogValue(playStorePackageVisibility)} reason=${optionLogValue(playStoreQueryReason)}")
                 appendLine("  bypassPackageVisibility=${optionLogValue(bypassPackageVisibility)}")
                 appendLine("  manifestCompatAttributes=${optionLogValue(manifestCompatAttributes)}")
                 appendLine("  legacyStorage=${optionLogValue(legacyStorage)}")
@@ -964,7 +982,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
             if (relaxLibraries == true) changed += relaxSharedLibraries(manifest)
             if (playStorePackageVisibility == true && addPackageVisibilityQuery(manifest, "com.android.vending")) {
                 changed++
-                logger.info("Legacy compatibility: added Google Play package visibility query.")
+                logger.info("Legacy compatibility: added Google Play package visibility query; reason=$playStoreQueryReason.")
             }
             if (bypassPackageVisibility == true) {
                 if (addPermission(manifest, QUERY_ALL_PACKAGES)) {
@@ -990,6 +1008,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
             logger.info(
                 "Legacy compatibility: target SDK source=${optionLogValue(update.originalTarget)} selected=${optionLogValue(update.selectedTarget)} final=${optionLogValue(readback)} outcome=${update.outcome} profile=${optionLogValue(targetSdkProfile)}",
             )
+            logger.info("Legacy compatibility: decoded manifest target verification passed; run bash tools/verify-legacy-compatibility-artifact.sh with the compiled APK details before release.")
             when (update.outcome) {
                 LegacyTargetSdkOutcome.AUTOMATIC_PRESERVED -> logger.warning(
                     "Legacy compatibility: Automatic target profile preserved the original target SDK " + readback + "; select an explicit profile to change it.",

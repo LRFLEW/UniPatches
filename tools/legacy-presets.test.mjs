@@ -25,6 +25,13 @@ test('explicit target SDK defaults to the Android 7+ install floor', () => {
   assert.match(manifest, /val targetSdkRaw by intOption\([\s\S]*?default = 24/);
   assert.match(manifest, /val targetSdkProfileRaw by stringOption\([\s\S]*?default = \"custom\"/);
 });
+test('OBB validation dependency is declared before downloader bypass hooks', () => {
+  const expansion = manifest.indexOf('dependsOn(legacyExpansionFilesPatch {');
+  const runtime = manifest.indexOf('dependsOn(legacyRuntimeHooksPatch {');
+  assert.notEqual(expansion, -1);
+  assert.notEqual(runtime, -1);
+  assert.ok(expansion < runtime, 'validate/stage OBB before enabling runtime downloader bypass');
+});
 test('repair missing exported flags is gated by final target API', () => {
   assert.match(manifest, /shouldRepairMissingExportFlags\(repairExportFlags == true, update\.finalTarget\)/);
 });

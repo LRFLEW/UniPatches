@@ -155,5 +155,5 @@ patches/bin/
 .classpath
 .settings/
 
-# Local-only Gun Bros 2 smoke helper; keep out of the public Morphe patch list.
-/tools/gunbros2-device-smoke.sh
+# Local-only tools
+/tools/

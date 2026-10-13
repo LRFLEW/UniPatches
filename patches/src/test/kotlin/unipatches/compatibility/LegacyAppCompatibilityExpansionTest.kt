@@ -85,6 +85,101 @@ class LegacyAppCompatibilityExpansionTest {
     }
 
     @Test
+    fun enforcesObbArchiveEntryAndExpandedByteLimits() {
+        val directory = java.nio.file.Files.createTempDirectory("legacy-obb-limits-").toFile()
+        val source = File(directory, "main.123.com.glu.gunbros2.obb")
+        ZipOutputStream(source.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry("assets/").apply { })
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("assets/a.dat"))
+            zip.write(byteArrayOf(1, 2, 3))
+            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("assets/b.dat"))
+            zip.write(byteArrayOf(4, 5))
+            zip.closeEntry()
+        }
+        try {
+            val base = ExpansionObbLimits(
+                maxArchiveBytes = source.length(),
+                maxEntries = 4,
+                maxEntryBytes = 3,
+                maxTotalExpandedBytes = 5,
+            )
+            assertEquals(source, validateExpansionObbInput(source.path, "com.glu.gunbros2", "123", base))
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(source.path, "com.glu.gunbros2", "123", base.copy(maxArchiveBytes = source.length() - 1))
+            }.message!!.contains("archive limit"))
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(source.path, "com.glu.gunbros2", "123", base.copy(maxEntries = 2))
+            }.message!!.contains("entry limit"))
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(source.path, "com.glu.gunbros2", "123", base.copy(maxEntryBytes = 2))
+            }.message!!.contains("expanded limit"))
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(source.path, "com.glu.gunbros2", "123", base.copy(maxTotalExpandedBytes = 4))
+            }.message!!.contains("total expanded limit"))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun malformedObbEntryStreamUsesReadableArchiveError() {
+        val directory = java.nio.file.Files.createTempDirectory("legacy-malformed-obb-").toFile()
+        val source = File(directory, "main.123.com.glu.gunbros2.obb")
+        ZipOutputStream(source.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry("assets/data.bin"))
+            zip.write("payload-that-will-be-truncated".toByteArray())
+            zip.closeEntry()
+        }
+        val bytes = source.readBytes()
+        val centralDirectory = bytes.indices.first { index ->
+            index + 4 <= bytes.size && bytes[index] == 0x50.toByte() && bytes[index + 1] == 0x4b.toByte() &&
+                bytes[index + 2] == 0x01.toByte() && bytes[index + 3] == 0x02.toByte()
+        }
+        source.writeBytes(bytes.copyOf(centralDirectory))
+        try {
+            val error = assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(source.path, "com.glu.gunbros2", "123")
+            }
+            assertTrue(error.message!!.contains("not a readable ZIP archive"))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rejectsObbEntriesWithCorruptPayloadCrc() {
+        val directory = java.nio.file.Files.createTempDirectory("legacy-corrupt-obb-crc-").toFile()
+        val source = File(directory, "main.123.com.glu.gunbros2.obb")
+        val payload = "crc-checked-obb-payload".toByteArray()
+        val crc = java.util.zip.CRC32().apply { update(payload) }.value
+        ZipOutputStream(source.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry("assets/bin/Data/main.dat").apply {
+                method = ZipEntry.STORED
+                size = payload.size.toLong()
+                compressedSize = payload.size.toLong()
+                this.crc = crc
+            })
+            zip.write(payload)
+            zip.closeEntry()
+        }
+        val bytes = source.readBytes()
+        val payloadOffset = bytes.indices.first { index ->
+            index + payload.size <= bytes.size && payload.indices.all { bytes[index + it] == payload[it] }
+        }
+        bytes[payloadOffset] = (bytes[payloadOffset].toInt() xor 1).toByte()
+        source.writeBytes(bytes)
+        try {
+            assertTrue(assertThrows(IllegalArgumentException::class.java) {
+                validateExpansionObbInput(source.path, "com.glu.gunbros2", "123")
+            }.message!!.contains("ZIP integrity"))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun reportsWhetherObbMustShipSeparately() {
         val name = "main.123.com.glu.gunbros2.obb"
         assertTrue(expansionObbInstallInstruction("com.glu.gunbros2", name, embedded = true).contains("staged on first launch"))
@@ -150,6 +245,13 @@ class LegacyAppCompatibilityExpansionTest {
             assertNull(zip.getEntry(monoLibrary))
             assertNotNull(zip.getEntry("assets/bin/Data/"))
             assertEquals("game", zip.getInputStream(zip.getEntry(data)).use { it.readBytes().toString(Charsets.UTF_8) })
+        }
+        val validated = File(rewritten.parentFile, "main.123.com.glu.gunbros2.obb")
+        rewritten.copyTo(validated, overwrite = true)
+        try {
+            assertEquals(validated, validateExpansionObbInput(validated.path, "com.glu.gunbros2", "123"))
+        } finally {
+            validated.delete()
         }
     }
 

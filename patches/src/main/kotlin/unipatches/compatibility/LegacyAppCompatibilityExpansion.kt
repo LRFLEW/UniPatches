@@ -71,10 +71,18 @@ internal fun isExpansionFileForPackage(
         (expectedVersionCode.isNullOrBlank() || expectedVersionCode == match.groupValues[1])
 }
 
+internal data class ExpansionObbLimits(
+    val maxArchiveBytes: Long = 2L * 1024 * 1024 * 1024,
+    val maxEntries: Int = 100_000,
+    val maxEntryBytes: Long = 2L * 1024 * 1024 * 1024,
+    val maxTotalExpandedBytes: Long = 4L * 1024 * 1024 * 1024,
+)
+
 internal fun validateExpansionObbInput(
     path: String,
     packageName: String,
     expectedVersionCode: String? = null,
+    limits: ExpansionObbLimits = ExpansionObbLimits(),
 ): File {
     val selectedPath = path.trim()
     require(selectedPath.isNotEmpty()) {
@@ -91,15 +99,71 @@ internal fun validateExpansionObbInput(
         val version = expectedVersionCode?.takeIf { it.isNotBlank() }?.let { " versionCode $it" }.orEmpty()
         "Legacy compatibility: OBB filename does not match APK package $packageName$version: ${source.name}"
     }
+    require(limits.maxArchiveBytes > 0 && limits.maxEntries > 0 && limits.maxEntryBytes >= 0 && limits.maxTotalExpandedBytes >= 0) {
+        "Legacy compatibility: invalid expansion OBB validation limits."
+    }
+    require(source.length() <= limits.maxArchiveBytes) {
+        "Legacy compatibility: expansion OBB exceeds the ${limits.maxArchiveBytes}-byte archive limit: ${source.name}"
+    }
     try {
         ZipFile(source).use { zip ->
             require(zip.entries().hasMoreElements()) {
                 "Legacy compatibility: expansion OBB contains no entries: ${source.name}"
             }
+            var entryCount = 0
+            var fileCount = 0
+            var totalExpandedBytes = 0L
+            val entries = zip.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                entryCount++
+                require(entryCount <= limits.maxEntries) {
+                    "Legacy compatibility: expansion OBB exceeds the ${limits.maxEntries}-entry limit: ${source.name}"
+                }
+                if (entry.isDirectory) continue
+                fileCount++
+                require(entry.size >= 0 && entry.crc >= 0) {
+                    "Legacy compatibility: expansion OBB ZIP integrity metadata is incomplete for ${entry.name}."
+                }
+                require(entry.size <= limits.maxEntryBytes) {
+                    "Legacy compatibility: expansion OBB entry ${entry.name} exceeds the ${limits.maxEntryBytes}-byte expanded limit."
+                }
+                require(entry.size <= limits.maxTotalExpandedBytes - totalExpandedBytes) {
+                    "Legacy compatibility: expansion OBB exceeds the ${limits.maxTotalExpandedBytes}-byte total expanded limit."
+                }
+                val crc = java.util.zip.CRC32()
+                var bytesRead = 0L
+                zip.getInputStream(entry).use { input ->
+                    val buffer = ByteArray(DEFAULT_COPY_BUFFER)
+                    while (true) {
+                        val count = try {
+                            input.read(buffer)
+                        } catch (error: IllegalArgumentException) {
+                            throw IOException("Malformed ZIP entry data in ${entry.name}.", error)
+                        }
+                        if (count < 0) break
+                        require(count.toLong() <= limits.maxEntryBytes - bytesRead) {
+                            "Legacy compatibility: expansion OBB entry ${entry.name} exceeds the ${limits.maxEntryBytes}-byte expanded limit."
+                        }
+                        require(count.toLong() <= limits.maxTotalExpandedBytes - totalExpandedBytes - bytesRead) {
+                            "Legacy compatibility: expansion OBB exceeds the ${limits.maxTotalExpandedBytes}-byte total expanded limit."
+                        }
+                        crc.update(buffer, 0, count)
+                        bytesRead += count
+                    }
+                }
+                require(bytesRead == entry.size && crc.value == entry.crc) {
+                    "Legacy compatibility: expansion OBB ZIP integrity check failed for ${entry.name}."
+                }
+                totalExpandedBytes += bytesRead
+            }
+            require(fileCount > 0) {
+                "Legacy compatibility: expansion OBB contains no files: ${source.name}"
+            }
         }
     } catch (error: IOException) {
         throw IllegalArgumentException(
-            "Legacy compatibility: expansion OBB is not a readable ZIP archive: ${source.name}",
+            "Legacy compatibility: expansion OBB is not a readable ZIP archive or failed ZIP integrity check: ${source.name}",
             error,
         )
     }
@@ -223,13 +287,15 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
                     output.outputStream().use { outputStream -> input.copyTo(outputStream, DEFAULT_COPY_BUFFER) }
                 }
             }
+            validateExpansionObbInput(output.absolutePath, packageName, StartupHooks.resolvedVersionCode)
+            val sourceSha256 = expansionSha256(source)
             val checksumAsset = get(expansionChecksumAssetPath(source.name), false)
             checksumAsset.parentFile?.mkdirs()
             val checksumText = expansionChecksumText(output)
             checksumAsset.writeText(checksumText)
             val outputSha256 = checksumText.trimEnd().substringAfter('\n')
             logger.info(
-                "Legacy compatibility: OBB embedded source=${source.name} sourceBytes=${source.length()} embeddedBytes=${output.length()} sha256=$outputSha256 relocatedNativeLibraries=${if (rewriteEmbeddedObb) nativeEntries.size else 0}.",
+                "Legacy compatibility: OBB embedded source=${source.name} sourceBytes=${source.length()} sourceSha256=$sourceSha256 embeddedBytes=${output.length()} embeddedSha256=$outputSha256 relocatedNativeLibraries=${if (rewriteEmbeddedObb) nativeEntries.size else 0}; embedded ZIP entries and CRCs verified.",
             )
             logger.info("Legacy compatibility install: " + expansionObbInstallInstruction(packageName, source.name, embedded = true))
         } else {
