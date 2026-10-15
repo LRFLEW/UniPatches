@@ -21,6 +21,8 @@ dependencies {
     implementation(libs.gson)
     implementation(libs.xz)
     testImplementation("junit:junit:4.13.2")
+    // Compile real-APK tests against the patcher's already-installed runtime APIs.
+    testCompileOnly(files(configurations.runtimeClasspath))
     patchListGeneratorClasspath(libs.gson)
 }
 

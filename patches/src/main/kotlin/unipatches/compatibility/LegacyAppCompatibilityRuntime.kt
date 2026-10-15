@@ -147,7 +147,12 @@ internal fun legacyRuntimeHooksPatch(optionsProvider: () -> LegacyRuntimeOptions
     default = false,
 ) {
     // Runtime helpers (unipatch.compatcore, org.lsposed.hiddenapibypass) live in the extension dex.
-    extendWith("extensions/extension.mpe")
+    extendWithAll {
+        if (optionsProvider().anyEnabled) listOf(java.util.function.Supplier {
+            LegacyRuntimeOptions::class.java.classLoader.getResourceAsStream("extensions/extension.mpe")
+                ?: error("Extension \"extensions/extension.mpe\" not found")
+        }) else emptyList()
+    }
     dependsOn(StartupHooks.resolveRealApplicationPatch)
 
     execute {

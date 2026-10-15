@@ -32,19 +32,12 @@ class LegacyAppCompatibilityPreflightTest {
     }
 
     @Test
-    fun diagnosticsOnlyGateDisablesEveryMutation() {
-        assertFalse(shouldApplyLegacyCompatibilityMutations(diagnosticsOnly = true))
-        assertTrue(shouldApplyLegacyCompatibilityMutations(diagnosticsOnly = false))
-    }
-
-    @Test
     fun missingTargetSdkIsReportedWhenSpoofingIsDisabled() {
         val manifest = newDocument().apply { appendChild(createElement("manifest")) }
 
         val finding = legacyManifestPreflightFindings(
             document = manifest,
             spoofTargetSdk = false,
-            targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
             customTargetSdk = 34,
             repairExportFlags = false,
             exportAllActivityComponents = false,
@@ -60,7 +53,7 @@ class LegacyAppCompatibilityPreflightTest {
     }
 
     @Test
-    fun automaticTargetSdkProfileReportsPreservationOfExistingTarget() {
+    fun numericTargetSdkReportsExactSelectedValue() {
         val document = newDocument()
         val manifest = document.createElement("manifest")
         val usesSdk = document.createElement("uses-sdk").apply {
@@ -72,7 +65,6 @@ class LegacyAppCompatibilityPreflightTest {
         val finding = legacyManifestPreflightFindings(
             document = document,
             spoofTargetSdk = true,
-            targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
             customTargetSdk = 34,
             repairExportFlags = false,
             exportAllActivityComponents = false,
@@ -82,7 +74,7 @@ class LegacyAppCompatibilityPreflightTest {
             expansionObbPath = null,
         ).single { it.pattern == "uses-sdk targetSdkVersion" }
 
-        assertTrue(finding.proposal.contains("Automatic preserves existing targetSdkVersion 16"))
+        assertTrue(finding.proposal.contains("set targetSdkVersion to 34"))
     }
 
     @Test
@@ -98,7 +90,6 @@ class LegacyAppCompatibilityPreflightTest {
         fun targetFinding(spoof: Boolean) = legacyManifestPreflightFindings(
             document = document,
             spoofTargetSdk = spoof,
-            targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
             customTargetSdk = 34,
             repairExportFlags = false,
             exportAllActivityComponents = false,
@@ -114,7 +105,7 @@ class LegacyAppCompatibilityPreflightTest {
         assertTrue(disabled.uncertainty.contains("preserved"))
 
         val enabled = targetFinding(spoof = true)
-        assertTrue(enabled.proposal.contains("set targetSdkVersion to 27"))
+        assertTrue(enabled.proposal.contains("set targetSdkVersion to 34"))
         assertTrue(enabled.uncertainty.contains("not a valid integer"))
         assertEquals("not-a-number", usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion"))
     }
@@ -136,7 +127,6 @@ class LegacyAppCompatibilityPreflightTest {
             fun finding(path: String) = legacyManifestPreflightFindings(
                 document = document,
                 spoofTargetSdk = false,
-                targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
                 customTargetSdk = 34,
                 repairExportFlags = false,
                 exportAllActivityComponents = false,
@@ -170,7 +160,6 @@ class LegacyAppCompatibilityPreflightTest {
             fun finding(path: String) = legacyManifestPreflightFindings(
                 document = document,
                 spoofTargetSdk = false,
-                targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
                 customTargetSdk = 34,
                 repairExportFlags = false,
                 exportAllActivityComponents = false,
@@ -207,7 +196,6 @@ class LegacyAppCompatibilityPreflightTest {
         val findings = legacyManifestPreflightFindings(
             document = document,
             spoofTargetSdk = true,
-            targetSdkProfile = TARGET_PROFILE_AUTOMATIC,
             customTargetSdk = 34,
             repairExportFlags = true,
             exportAllActivityComponents = false,
@@ -239,7 +227,6 @@ class LegacyAppCompatibilityPreflightTest {
         val finding = legacyManifestPreflightFindings(
             document = document,
             spoofTargetSdk = false,
-            targetSdkProfile = TARGET_PROFILE_CUSTOM,
             customTargetSdk = 24,
             repairExportFlags = true,
             exportAllActivityComponents = false,

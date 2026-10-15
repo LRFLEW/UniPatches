@@ -100,7 +100,7 @@ class LegacyAppCompatibilityManifestTest {
         manifest.appendChild(usesSdk)
         document.appendChild(manifest)
 
-        val result = applyLegacyTargetSdk(document, spoofEnabled = true, profile = TARGET_PROFILE_CUSTOM, customTarget = 34)
+        val result = applyLegacyTargetSdk(document, spoofEnabled = true, customTarget = 34)
 
         assertEquals(16, result.originalTarget)
         assertEquals(34, result.selectedTarget)
@@ -122,7 +122,6 @@ class LegacyAppCompatibilityManifestTest {
         val result = applyLegacyTargetSdk(
             document,
             spoofEnabled = enabled == true,
-            profile = TARGET_PROFILE_CUSTOM,
             customTarget = 24,
         )
 
@@ -133,7 +132,7 @@ class LegacyAppCompatibilityManifestTest {
     }
 
     @Test
-    fun automaticTargetSdkSelectionReportsPreservationOfLegacyValue() {
+    fun missingNumericTargetDefaultsToInstallFloor() {
         val document = newDocument()
         val manifest = document.createElement("manifest")
         val usesSdk = document.createElement("uses-sdk").apply {
@@ -142,12 +141,12 @@ class LegacyAppCompatibilityManifestTest {
         manifest.appendChild(usesSdk)
         document.appendChild(manifest)
 
-        val result = applyLegacyTargetSdk(document, spoofEnabled = true, profile = TARGET_PROFILE_AUTOMATIC, customTarget = 34)
+        val result = applyLegacyTargetSdk(document, spoofEnabled = true, customTarget = null)
 
-        assertEquals(16, result.selectedTarget)
-        assertEquals(16, result.finalTarget)
-        assertEquals(LegacyTargetSdkOutcome.AUTOMATIC_PRESERVED, result.outcome)
-        assertEquals("16", usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion"))
+        assertEquals(24, result.selectedTarget)
+        assertEquals(24, result.finalTarget)
+        assertEquals(LegacyTargetSdkOutcome.UPDATED, result.outcome)
+        assertEquals("24", usesSdk.getAttributeNS(NS_ANDROID, "targetSdkVersion"))
     }
 
     @Test
@@ -160,7 +159,7 @@ class LegacyAppCompatibilityManifestTest {
         manifest.appendChild(usesSdk)
         document.appendChild(manifest)
 
-        val result = applyLegacyTargetSdk(document, spoofEnabled = false, profile = TARGET_PROFILE_CUSTOM, customTarget = 34)
+        val result = applyLegacyTargetSdk(document, spoofEnabled = false, customTarget = 34)
 
         assertEquals(16, result.originalTarget)
         assertNull(result.selectedTarget)
@@ -198,6 +197,51 @@ class LegacyAppCompatibilityManifestTest {
         assertEquals("32", permission.getAttributeNS(NS_ANDROID, "maxSdkVersion"))
         assertFalse(addPermission(document, "a.b.C", maxSdkVersion = 32))
         assertEquals(1, permissions.length)
+    }
+
+    @Test
+    fun manifestHelpersHandleParsedAttributesWithoutDuplicates() {
+        for (namespaceAware in listOf(false, true)) {
+            val document = DocumentBuilderFactory.newInstance().apply {
+                isNamespaceAware = namespaceAware
+            }.newDocumentBuilder().parse(
+                """
+                <manifest xmlns:android="$NS_ANDROID" android:versionCode="123">
+                    <uses-permission android:name="$BLUETOOTH_CONNECT"/>
+                    <uses-permission-sdk-23 android:name="$FOREGROUND_SERVICE"/>
+                    <supports-screens android:smallScreens="false" android:normalScreens="false"
+                        android:largeScreens="false" android:xlargeScreens="false" android:anyDensity="false"/>
+                    <application android:usesCleartextTraffic="false" android:extractNativeLibs="false"
+                        android:networkSecurityConfig="@xml/network_config">
+                        <uses-library android:name="$APACHE_LEGACY_LIB" android:required="true"/>
+                    </application>
+                </manifest>
+                """.trimIndent().byteInputStream()
+            )
+            assertEquals("123", document.documentElement.androidAttribute("versionCode"))
+            assertFalse(addPermission(document, BLUETOOTH_CONNECT))
+            assertFalse(addPermission(document, FOREGROUND_SERVICE))
+            assertEquals(0, addLegacyReviver(document, apache = true, foreground = true, alarms = false, bluetooth = false))
+            assertEquals(1, relaxSharedLibraries(document))
+            assertEquals(0, relaxSharedLibraries(document))
+            assertTrue(setApplicationAttribute(document, "usesCleartextTraffic", "true"))
+            assertFalse(setApplicationAttribute(document, "usesCleartextTraffic", "true"))
+            assertTrue(setApplicationAttribute(document, "extractNativeLibs", "true"))
+            assertEquals(0 to true, supportAllScreens(document))
+            assertEquals(0 to false, supportAllScreens(document))
+
+            val application = document.getElementsByTagName("application").item(0) as Element
+            assertTrue(application.hasAndroidAttribute("networkSecurityConfig"))
+            assertEquals("true", application.androidAttribute("usesCleartextTraffic"))
+            assertEquals("true", application.androidAttribute("extractNativeLibs"))
+            assertEquals(3, application.attributes.length)
+            val library = document.getElementsByTagName("uses-library").item(0) as Element
+            assertEquals("false", library.androidAttribute("required"))
+            assertEquals(2, library.attributes.length)
+            val screens = document.getElementsByTagName("supports-screens").item(0) as Element
+            assertEquals(5, screens.attributes.length)
+            assertEquals("true", screens.androidAttribute("anyDensity"))
+        }
     }
 
     @Test
@@ -282,6 +326,17 @@ class LegacyAppCompatibilityManifestTest {
         assertEquals("true", alias.androidAttribute("exported"))
         assertEquals("false", service.androidAttribute("exported"))
         assertEquals("false", receiver.androidAttribute("exported"))
+        assertFalse(alias.hasAndroidAttribute("permission"))
+        assertFalse(service.hasAndroidAttribute("permission"))
+    }
+
+    @Test
+    fun missingExportPolicyFailsClosedForUnverifiedReceiverActions() {
+        assertEquals(MissingExportPolicy(true), missingExportPolicy("activity", true))
+        assertEquals(MissingExportPolicy(false), missingExportPolicy("activity", false))
+        assertEquals(MissingExportPolicy(true), missingExportPolicy("activity-alias", true))
+        assertEquals(MissingExportPolicy(false), missingExportPolicy("receiver", false))
+        assertEquals(MissingExportPolicy(false), missingExportPolicy("service", false))
     }
 
     @Test
@@ -331,18 +386,15 @@ class LegacyAppCompatibilityManifestTest {
     }
 
     @Test
-    fun automaticTargetProfilePreservesKnownTargetAndUsesConservativeFallback() {
-        assertEquals(16, selectLegacyTargetSdk(16, TARGET_PROFILE_AUTOMATIC, 34))
-        assertEquals(30, selectLegacyTargetSdk(30, TARGET_PROFILE_AUTOMATIC, 34))
-        assertEquals(34, selectLegacyTargetSdk(34, TARGET_PROFILE_AUTOMATIC, 34))
-        assertEquals(27, selectLegacyTargetSdk(null, TARGET_PROFILE_AUTOMATIC, 34))
-    }
-
-    @Test
-    fun explicitTargetProfilesOverrideCustomValue() {
-        assertEquals(27, selectLegacyTargetSdk(16, TARGET_PROFILE_27, 34))
-        assertEquals(29, selectLegacyTargetSdk(16, TARGET_PROFILE_29, 34))
-        assertEquals(34, selectLegacyTargetSdk(16, TARGET_PROFILE_CUSTOM, 34))
+    fun targetOutsideAcceptedRangeLeavesManifestUnchanged() {
+        val document = newDocument()
+        document.appendChild(document.createElement("manifest"))
+        updateTargetSdk(document, 16)
+        for (target in listOf(0, 22, 41)) {
+            val result = applyLegacyTargetSdk(document, true, target)
+            assertEquals(LegacyTargetSdkOutcome.OUT_OF_RANGE, result.outcome)
+            assertEquals(16, originalTargetSdk(document))
+        }
     }
 
     @Test

@@ -1,3 +1,15 @@
+## [1.32.0-dev.1](https://github.com/Zanuaimi/UniPatches/compare/v1.31.3-dev.1...v1.32.0-dev.1) (2026-10-15)
+
+### ✨ New Features
+
+* **compatibility:** Reworked presets to be only additive on top of custom preset, and target SDK profile dropdown has been removed, and duplicate flags have been removed ([f19412a](https://github.com/Zanuaimi/UniPatches/commit/f19412a14fe3acbf7e962cdd88973843e1bfbbda))
+
+## [1.31.3-dev.1](https://github.com/Zanuaimi/UniPatches/compare/v1.31.2...v1.31.3-dev.1) (2026-10-13)
+
+### 🐛 Bug Fixes
+
+* **compatibility:** Fix SDK edit and obb detection ([03b01ad](https://github.com/Zanuaimi/UniPatches/commit/03b01ad10c52602061429e7b19fe5e847343e9fd))
+
 ## [1.31.2](https://github.com/Zanuaimi/UniPatches/compare/v1.31.1...v1.31.2) (2026-10-12)
 
 ### 🔧 Improvements
