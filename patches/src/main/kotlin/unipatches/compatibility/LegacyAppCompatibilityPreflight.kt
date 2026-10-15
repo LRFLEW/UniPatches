@@ -24,14 +24,13 @@ internal fun formatLegacyCompatibilityPreflightFinding(finding: LegacyCompatibil
         "api=${preflightValue(finding.apiRange)}; confidence=${preflightValue(finding.confidence)}; " +
         "uncertainty=${preflightValue(finding.uncertainty)}"
 
-internal fun shouldApplyLegacyCompatibilityMutations(diagnosticsOnly: Boolean): Boolean = !diagnosticsOnly
-
-internal fun legacyCompatibilityBytecodePreflightPatch() = bytecodePatch(
+internal fun legacyCompatibilityBytecodePreflightPatch(enabledProvider: () -> Boolean) = bytecodePatch(
     name = null,
     description = "Internal diagnostics-only scan for Legacy App Compatibility fingerprints.",
     default = false,
 ) {
     execute {
+        if (!enabledProvider()) return@execute
         val logger = Logger.getLogger(this::class.java.name)
         val classes = mutableListOf<ClassDef>()
         classDefForEach { classes += it }

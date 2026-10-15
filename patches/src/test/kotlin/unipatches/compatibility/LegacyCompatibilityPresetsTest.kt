@@ -4,41 +4,59 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LegacyCompatibilityPresetsTest {
+    private val explicitOptions = listOf(
+        "diagnosticsOnly", "spoofTargetSdk", "exactAlarms", "trustCertificates",
+        "acknowledgeTrustCertificates", "spoofImei", "bypassPackageVisibility",
+        "exportAllActivityComponents", "allowCleartext", "bypassHiddenApi",
+        "relocateExpansionNativeLibraries", "removeRelocatedNativeLibrariesFromObb",
+        "embedExpansionObb", "bypassExpansionDownloader", "extractNativeLibs",
+        "playStorePackageVisibility", "redirectLegacyStorage", "allScreens",
+        "relaxLibraries", "manifestCompatAttributes", "legacyStorage",
+        "disableHeapTagging", "vmSafeMode",
+    )
+
     @Test fun customPreservesManualChoices() {
-        assertTrue(LegacyCompatibilityPresets.boolean("custom", "allowCleartext", true)!!)
-        assertTrue(LegacyCompatibilityPresets.boolean("custom", "spoofTargetSdk", true)!!)
-        assertFalse(LegacyCompatibilityPresets.boolean("custom", "spoofTargetSdk", false)!!)
-        assertTrue(LegacyCompatibilityPresets.boolean("custom", "embedExpansionObb", true)!!)
-        assertEquals(35, LegacyCompatibilityPresets.target("custom", 35))
-    }
-    @Test fun presetsDisableEveryExplicitOptIn() {
-        for (id in LegacyCompatibilityPresets.ids - "custom") {
-            for (key in listOf("trustCertificates", "acknowledgeTrustCertificates", "spoofImei", "bypassPackageVisibility", "exportAllActivityComponents", "allowCleartext", "bypassHiddenApi", "spoofTargetSdk"))
-                assertFalse("$id/$key", LegacyCompatibilityPresets.boolean(id, key, true)!!)
-            assertFalse(LegacyCompatibilityPresets.boolean(id, "embedExpansionObb", true)!!)
+        for (key in explicitOptions + listOf("legacyReviver", "apacheLegacy", "foregroundService", "bluetooth", "receiverFixAppWide", "repairExportFlags")) {
+            assertTrue(key, LegacyCompatibilityPresets.boolean("custom", key, true))
+            assertFalse(key, LegacyCompatibilityPresets.boolean("custom", key, false))
+            assertFalse(key, LegacyCompatibilityPresets.boolean("custom", key, null))
         }
     }
-    @Test fun presetDropdownIncludesAndroidFourThroughFourteenOrigins() {
-        assertEquals("custom", LegacyCompatibilityPresets.options.entries.first().value)
-        assertEquals("android_4_x", LegacyCompatibilityPresets.options["Android 4.x origin"])
-        assertEquals("android_5_6", LegacyCompatibilityPresets.options["Android 5–6 origin"])
-        assertEquals("android_7_9", LegacyCompatibilityPresets.options["Android 7–9 origin"])
-        assertEquals(listOf(20, 23, 28, 29, 30, 32, 33, 34), LegacyCompatibilityPresets.eras.values.toList())
-        assertTrue(LegacyCompatibilityPresets.boolean("android_4_x", "legacyReviver", false)!!)
-        assertTrue(LegacyCompatibilityPresets.boolean("android_5_6", "bluetooth", false)!!)
+
+    @Test fun presetsNeverModifyExplicitOptIns() {
+        for (id in LegacyCompatibilityPresets.ids) {
+            for (key in explicitOptions) {
+                assertTrue("$id/$key", LegacyCompatibilityPresets.boolean(id, key, true))
+                assertFalse("$id/$key", LegacyCompatibilityPresets.boolean(id, key, false))
+            }
+        }
     }
 
-    @Test fun eraMappingDoesNotBlindlyDowngradeTarget() {
+    @Test fun eraPresetsOnlyAddOrdinaryFixes() {
         assertEquals(listOf(20, 23, 28, 29, 30, 32, 33, 34), LegacyCompatibilityPresets.eras.values.toList())
-        assertFalse(LegacyCompatibilityPresets.boolean("android_11", "apacheLegacy", true)!!)
-        assertTrue(LegacyCompatibilityPresets.boolean("android_7_9", "apacheLegacy", false)!!)
-        assertTrue(LegacyCompatibilityPresets.boolean("android_7_9", "legacyReviver", false)!!)
-        assertTrue(LegacyCompatibilityPresets.boolean("android_10", "legacyReviver", false)!!)
-        assertFalse(LegacyCompatibilityPresets.boolean("unity", "legacyReviver", true)!!)
-        assertFalse(LegacyCompatibilityPresets.boolean("android_14_plus", "bluetooth", true)!!)
-        for (id in LegacyCompatibilityPresets.ids - "custom")
-            assertFalse(LegacyCompatibilityPresets.boolean(id, "spoofTargetSdk", true)!!)
+        for ((id, era) in LegacyCompatibilityPresets.eras) {
+            for (key in listOf("legacyReviver", "receiverFixAppWide", "repairExportFlags"))
+                assertTrue("$id/$key", LegacyCompatibilityPresets.boolean(id, key, false))
+            for (key in listOf("apacheLegacy", "foregroundService", "bluetooth")) {
+                assertTrue("$id/$key", LegacyCompatibilityPresets.boolean(id, key, true))
+                assertEquals("$id/$key", if (key == "bluetooth") era < 31 else era <= 28,
+                    LegacyCompatibilityPresets.boolean(id, key, false))
+            }
+        }
     }
+
+    @Test fun dropdownOnlyContainsCustomAndEras() {
+        assertEquals(listOf("custom") + LegacyCompatibilityPresets.eras.keys, LegacyCompatibilityPresets.options.values.toList())
+    }
+
+    @Test fun removedPresetsMigrateToCustomWithoutLosingChoices() {
+        for (id in listOf("unity", "openiab", "unity_openiab")) {
+            assertEquals("custom", LegacyCompatibilityPresets.validate(id))
+            assertTrue(LegacyCompatibilityPresets.boolean(id, "embedExpansionObb", true))
+            assertFalse(LegacyCompatibilityPresets.boolean(id, "receiverFixAppWide", false))
+        }
+    }
+
     @Test fun openIabDetectionIsIndependentOfUnity() {
         val engines = detectLegacyEngines(setOf("Lorg/onepf/oms/OpenIabHelper;"))
         assertTrue(engines.openIab)
@@ -46,26 +64,14 @@ class LegacyCompatibilityPresetsTest {
         assertFalse(detectLegacyEngines(setOf("Lorg/onepf/openiab/UnityPlugin;")).openIab)
         assertFalse(detectLegacyEngines(emptySet()).openIab)
     }
-    @Test fun openIabPresetRequiresDetectedEngineButCustomChoiceDoesNot() {
-        assertFalse(LegacyCompatibilityPresets.playStorePackageVisibility("openiab", true, false)!!)
-        assertTrue(LegacyCompatibilityPresets.playStorePackageVisibility("openiab", false, true)!!)
-        assertTrue(LegacyCompatibilityPresets.playStorePackageVisibility("openiab", true, true)!!)
-        assertTrue(LegacyCompatibilityPresets.playStorePackageVisibility("custom", true, false)!!)
-        assertFalse(LegacyCompatibilityPresets.playStorePackageVisibility("custom", false, true)!!)
-    }
-    @Test fun unityWithoutOpenIabDoesNotEnableOpenIabPresetQuery() {
-        val engines = detectLegacyEngines(
-            setOf("Lcom/unity3d/player/UnityPlayer;", "Lcom/unity3d/player/UnityPlayerActivity;"),
-        )
-        assertTrue(engines.unity)
-        assertFalse(engines.openIab)
-        assertFalse(LegacyCompatibilityPresets.playStorePackageVisibility("unity_openiab", true, engines.openIab)!!)
-    }
+
     @Test fun unityDetectionRequiresExactPlayerPair() {
         assertFalse(detectLegacyEngines(setOf("Lcom/unity3d/player/UnityPlayer;")).unity)
-        assertTrue(detectLegacyEngines(setOf("Lcom/unity3d/player/UnityPlayer;", "Lcom/unity3d/player/UnityPlayerActivity;")).unity)
+        val engines = detectLegacyEngines(setOf("Lcom/unity3d/player/UnityPlayer;", "Lcom/unity3d/player/UnityPlayerActivity;"))
+        assertTrue(engines.unity)
+        assertFalse(engines.openIab)
     }
-    @Test fun invalidPresetFailsClosed() {
-        try { LegacyCompatibilityPresets.validate("typo"); fail("invalid preset accepted") } catch (_: IllegalArgumentException) {}
-    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun invalidPresetFailsClosed() { LegacyCompatibilityPresets.validate("typo") }
 }
