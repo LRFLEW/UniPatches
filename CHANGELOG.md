@@ -1,3 +1,9 @@
+## [1.32.1-dev.1](https://github.com/Zanuaimi/UniPatches/compare/v1.32.0...v1.32.1-dev.1) (2026-10-16)
+
+### 🔧 Improvements
+
+* **compatibility:** Improve download manager bypass, and fix licensing intent ([249bd17](https://github.com/Zanuaimi/UniPatches/commit/249bd17c553785669c43fdb04171f9928938f029))
+
 ## [1.32.0](https://github.com/Zanuaimi/UniPatches/compare/v1.31.2...v1.32.0) (2026-10-15)
 
 ### 🐛 Bug Fixes
