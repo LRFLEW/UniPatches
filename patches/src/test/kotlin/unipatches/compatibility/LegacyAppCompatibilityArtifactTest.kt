@@ -3,6 +3,10 @@ package unipatches.compatibility
 import app.morphe.patcher.Patcher
 import app.morphe.patcher.PatcherConfig
 import app.morphe.patcher.apk.ApkUtils.applyTo
+import com.android.tools.smali.dexlib2.DexFileFactory
+import com.android.tools.smali.dexlib2.Opcodes
+import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import app.morphe.patcher.patch.resourcePatch
 import helpers.manifest.NS_ANDROID
 import kotlinx.coroutines.flow.collect
@@ -10,13 +14,92 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Assume.assumeNotNull
 import org.junit.Test
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 import java.util.logging.Logger
+import javax.xml.parsers.DocumentBuilderFactory
 
 /** Opt-in real-APK coverage: LEGACY_TEST_APK=/path/to/com.glu.gunbros2.apk ./gradlew :patches:test --rerun-tasks. */
 class LegacyAppCompatibilityArtifactTest {
+    @Test fun patchedGunBrosArtifactContainsExplicitLvlPackageAndUnityLauncher() {
+        val apkPath = System.getenv("LEGACY_TEST_APK")
+        val obbPath = System.getenv("LEGACY_TEST_OBB")
+        assumeNotNull(apkPath, obbPath)
+        val apk = File(apkPath!!)
+        val obb = File(obbPath!!)
+        require(apk.isFile) { "LEGACY_TEST_APK must point to Gun Bros 2 APK" }
+        require(obb.isFile) { "LEGACY_TEST_OBB must point to Gun Bros 2 OBB" }
+        val analyzer = findApkAnalyzer()
+        org.junit.Assume.assumeTrue("Set APKANALYZER or ANDROID_HOME to inspect compiled manifest", analyzer != null)
+
+        val patch = legacyAppCompatibilityPatch
+        patch.options.values.forEach { it.reset() }
+        patch.options["legacyCompatibilitySpoofTargetSdk"] = true
+        patch.options["legacyCompatibilityTargetSdk"] = 24
+        patch.options["legacyCompatibilityEmbedExpansionObb"] = true
+        patch.options["legacyCompatibilityBypassExpansionDownloader"] = true
+        patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
+        val messages = mutableListOf<String>()
+        val handler = object : Handler() {
+            override fun publish(record: LogRecord) { messages += record.message }
+            override fun flush() {}
+            override fun close() {}
+        }
+        val logger = Logger.getLogger("")
+        logger.addHandler(handler)
+        val output = File("build/legacy-artifacts").apply { mkdirs() }
+        val artifact = File(output, "gun-bros2-bypass-verified.apk")
+        try {
+            Patcher(PatcherConfig(apk, File(output, "gun-bros2-bypass-work"))).use { patcher ->
+                patcher += setOf(patch)
+                runBlocking { patcher().collect { result -> result.exception?.let { throw it } } }
+                apk.copyTo(artifact, overwrite = true)
+                patcher.get().applyTo(artifact)
+            }
+
+            val dexContainer = DexFileFactory.loadDexContainer(artifact, Opcodes.getDefault())
+            val licenseChecker = dexContainer.dexEntryNames
+                .mapNotNull { dexContainer.getEntry(it)?.dexFile }
+                .flatMap { it.classes }
+                .firstOrNull { it.type == "Lcom/google/android/vending/licensing/LicenseChecker;" }
+                ?: error("Patched artifact is missing LicenseChecker")
+            val checkAccess = licenseChecker.methods.firstOrNull {
+                it.name == "checkAccess" && it.parameterTypes == listOf("Lcom/google/android/vending/licensing/LicenseCheckerCallback;")
+            } ?: error("Patched artifact is missing LicenseChecker.checkAccess")
+            val instructions = checkAccess.implementation?.instructions?.toList().orEmpty()
+            assertTrue(
+                "Final DEX must explicitly scope LVL binding to com.android.vending",
+                hasPlayScopedLicenseServiceIntent(instructions),
+            )
+            val bindServiceMethods = instructions.mapNotNull { instruction ->
+                (instruction as? ReferenceInstruction)?.reference as? MethodReference
+            }.filter { it.name == "bindService" }
+            assertTrue(
+                "Final DEX must preserve Google Play license-service binding: $bindServiceMethods",
+                bindServiceMethods.any { method ->
+                    method.parameterTypes == listOf("Landroid/content/Intent;", "Landroid/content/ServiceConnection;", "I") &&
+                        method.returnType == "Z"
+                },
+            )
+
+            val manifestOutput = ProcessBuilder(analyzer!!.absolutePath, "manifest", "print", artifact.absolutePath)
+                .redirectErrorStream(true)
+                .start()
+            val compiledManifest = manifestOutput.inputStream.use { it.readBytes() }
+            assertEquals(String(compiledManifest, Charsets.UTF_8), 0, manifestOutput.waitFor())
+            val manifest = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+                .newDocumentBuilder().parse(ByteArrayInputStream(compiledManifest))
+            verifyExpansionDownloaderLauncher(manifest)
+            assertTrue(messages.any { it.contains("LicenseChecker.checkAccess patch verified") })
+            assertTrue(messages.any { it.contains("downloader bypass manifest verified after transformation") })
+        } finally {
+            logger.removeHandler(handler)
+            patch.options.values.forEach { it.reset() }
+        }
+    }
+
     @Test fun selectedOptionsReachDependenciesAndCompiledArtifacts() {
         val input = System.getenv("LEGACY_TEST_APK")
         assumeNotNull(input)
@@ -97,5 +180,16 @@ class LegacyAppCompatibilityArtifactTest {
             logger.removeHandler(handler)
             patch.options.values.forEach { it.reset() }
         }
+    }
+
+    private fun findApkAnalyzer(): File? {
+        val sdkRoots = listOfNotNull(System.getenv("ANDROID_HOME"), System.getenv("ANDROID_SDK_ROOT"))
+        val candidates = buildList {
+            System.getenv("APKANALYZER")?.let { add(File(it)) }
+            sdkRoots.forEach { root -> add(File(root, "cmdline-tools/latest/bin/apkanalyzer")) }
+            add(File(System.getProperty("user.home"), "Library/Android/sdk/cmdline-tools/latest/bin/apkanalyzer"))
+            add(File(System.getProperty("user.home"), "Android/Sdk/cmdline-tools/latest/bin/apkanalyzer"))
+        }
+        return candidates.firstOrNull { it.isFile }
     }
 }

@@ -827,6 +827,12 @@ val legacyAppCompatibilityPatch = resourcePatch(
             logger.info("Legacy compatibility preflight complete; diagnostics-only mode applied no APK changes.")
             return@execute
         }
+        validateExpansionDownloaderBypass(
+            selected = bypassExpansionDownloader == true,
+            unityDetected = detectedEngines.unity,
+            obbEmbeddingSelected = embedExpansionObb == true,
+            obbPath = obbPathForLog,
+        )
 
         var changed = 0
         var noApplication = false
@@ -904,10 +910,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
                     logger.warning("Legacy compatibility: target SDK $effectiveTarget is 30 or higher; requestLegacyExternalStorage is ignored on Android 11 and newer.")
                 }
             }
-            if (bypassExpansionDownloader == true && detectedEngines.unity) {
-                require(embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty()) {
-                    "Legacy compatibility: expansion downloader bypass requires OBB embedding and a valid selected OBB file."
-                }
+            if (bypassExpansionDownloader == true) {
                 changed += moveExpansionDownloaderLauncher(manifest, logger)
             }
             if (allScreens == true) {
@@ -933,6 +936,12 @@ val legacyAppCompatibilityPatch = resourcePatch(
             if (extractNativeLibs == true && setApplicationAttribute(manifest, "extractNativeLibs", "true")) changed++
             if (disableHeapTagging == true && setApplicationAttribute(manifest, "allowNativeHeapPointerTagging", "false")) changed++
             if (vmSafeMode == true && setApplicationAttribute(manifest, "vmSafeMode", "true")) changed++
+        }
+        if (bypassExpansionDownloader == true && detectedEngines.unity) {
+            get("AndroidManifest.xml", false).inputStream().use { input ->
+                document(input).use(::verifyExpansionDownloaderLauncher)
+            }
+            logger.info("Legacy compatibility: downloader bypass manifest verified after transformation; DownloaderActivity is not launcher and UnityLauncherActivity is launcher.")
         }
         targetSdkUpdate?.let { update ->
             val readback = get("AndroidManifest.xml", false).inputStream().use { input ->
