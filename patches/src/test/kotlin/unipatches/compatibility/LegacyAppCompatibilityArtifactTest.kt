@@ -37,10 +37,13 @@ class LegacyAppCompatibilityArtifactTest {
         val patch = legacyAppCompatibilityPatch
         patch.options.values.forEach { it.reset() }
         patch.options["legacyCompatibilitySpoofTargetSdk"] = true
-        patch.options["legacyCompatibilityTargetSdk"] = 24
+        patch.options["legacyCompatibilityTargetSdk"] = 34
+        patch.options["legacyCompatibilityPlayStoreVisibility"] = true
+        patch.options["legacyCompatibilityPackageVisibilityAllowlist"] = listOf("com.android.vending", "com.google.android.gms")
         patch.options["legacyCompatibilityEmbedExpansionObb"] = true
         patch.options["legacyCompatibilityBypassExpansionDownloader"] = true
         patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
+        patch.options["legacyCompatibilityRepairFileUriSharing"] = true
         val messages = mutableListOf<String>()
         val handler = object : Handler() {
             override fun publish(record: LogRecord) { messages += record.message }
@@ -83,6 +86,43 @@ class LegacyAppCompatibilityArtifactTest {
                         method.returnType == "Z"
                 },
             )
+            val allClasses = dexContainer.dexEntryNames.mapNotNull { dexContainer.getEntry(it)?.dexFile }.flatMap { it.classes }
+            val unityPlayer = allClasses.firstOrNull { it.type == "Lcom/unity3d/player/UnityPlayer;" }
+                ?: error("Patched artifact is missing UnityPlayer")
+            val shareInstructions = unityPlayer.methods.mapNotNull { method ->
+                val instructions = method.implementation?.instructions?.toList() ?: return@mapNotNull null
+                if (instructions.any { instruction ->
+                        val reference = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                        reference?.definingClass == "Lunipatch/compatcore/LegacyCompatRuntime;" && reference.name == "fileUriForShare"
+                    }) method.name to instructions else null
+            }
+            assertEquals("Exactly one known Unity file URI share flow must be rewritten", 1, shareInstructions.size)
+            val (shareMethodName, shareMethodInstructions) = shareInstructions.single()
+            val fileUriCall = shareMethodInstructions.indexOfFirst { instruction ->
+                val reference = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                reference?.definingClass == "Lunipatch/compatcore/LegacyCompatRuntime;" && reference.name == "fileUriForShare"
+            }
+            val intentDataCall = shareMethodInstructions.indexOfFirst { instruction ->
+                val reference = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                reference?.definingClass == "Landroid/content/Intent;" && reference.name == "setDataAndType"
+            }
+            val grantCall = shareMethodInstructions.indexOfFirst { instruction ->
+                val reference = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                reference?.definingClass == "Lunipatch/compatcore/LegacyCompatRuntime;" && reference.name == "grantFileUriReadPermission"
+            }
+            assertTrue("File URI conversion must precede Intent consumption in $shareMethodName", fileUriCall >= 0 && fileUriCall < intentDataCall)
+            assertTrue("URI read grant must follow Intent data assignment in $shareMethodName", intentDataCall < grantCall)
+            val fileProvider = allClasses.singleOrNull { it.type == "Lunipatch/compatcore/LegacyCompatFileProvider;" }
+                ?: error("Patched artifact is missing LegacyCompatFileProvider")
+            val providerOnCreate = fileProvider.methods.single { it.name == "onCreate" && it.parameterTypes.isEmpty() }
+            assertTrue(
+                "ContentProvider must initialize sharing context before application startup",
+                providerOnCreate.implementation?.instructions?.any { instruction ->
+                    val reference = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                    reference?.definingClass == "Lunipatch/compatcore/LegacyCompatRuntime;" &&
+                        reference.name == "init" && reference.parameterTypes == listOf("Landroid/content/Context;")
+                } == true,
+            )
 
             val manifestOutput = ProcessBuilder(analyzer!!.absolutePath, "manifest", "print", artifact.absolutePath)
                 .redirectErrorStream(true)
@@ -92,8 +132,44 @@ class LegacyAppCompatibilityArtifactTest {
             val manifest = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
                 .newDocumentBuilder().parse(ByteArrayInputStream(compiledManifest))
             verifyExpansionDownloaderLauncher(manifest)
+            val application = manifest.getElementsByTagName("application").item(0) as org.w3c.dom.Element
+            val packageQueries = (0 until manifest.getElementsByTagName("package").length).map { index ->
+                (manifest.getElementsByTagName("package").item(index) as org.w3c.dom.Element).getAttributeNS(NS_ANDROID, "name")
+            }.toSet()
+            assertTrue(packageQueries.containsAll(setOf("com.android.vending", "com.google.android.gms")))
+            assertEquals(0, manifest.getElementsByTagName("uses-permission").let { permissions ->
+                (0 until permissions.length).count { index ->
+                    (permissions.item(index) as org.w3c.dom.Element).getAttributeNS(NS_ANDROID, "name") == "android.permission.QUERY_ALL_PACKAGES"
+                }
+            })
+            assertTrue(messages.any { it.contains("package visibility queries verified") })
             assertTrue(messages.any { it.contains("LicenseChecker.checkAccess patch verified") })
             assertTrue(messages.any { it.contains("downloader bypass manifest verified after transformation") })
+            assertTrue(messages.any { it.contains("private file-sharing provider verified") })
+            val provider = (0 until manifest.getElementsByTagName("provider").length)
+                .map { manifest.getElementsByTagName("provider").item(it) as org.w3c.dom.Element }
+                .single { it.getAttributeNS(NS_ANDROID, "name") == LEGACY_FILE_PROVIDER_CLASS }
+            assertEquals("com.glu.gunbros2.legacycompat.fileprovider", provider.getAttributeNS(NS_ANDROID, "authorities"))
+            assertEquals("false", provider.getAttributeNS(NS_ANDROID, "exported"))
+            assertEquals("true", provider.getAttributeNS(NS_ANDROID, "grantUriPermissions"))
+            val providerPathsReference = (0 until provider.getElementsByTagName("meta-data").length)
+                .map { provider.getElementsByTagName("meta-data").item(it) as org.w3c.dom.Element }
+                .single { it.getAttributeNS(NS_ANDROID, "name") == "android.support.FILE_PROVIDER_PATHS" }
+                .getAttributeNS(NS_ANDROID, "resource")
+            assertTrue("Compiled manifest must reference provider paths resource: $providerPathsReference", Regex("@(xml/$LEGACY_FILE_PROVIDER_PATHS_RESOURCE|ref/0x[0-9a-fA-F]{8})").matches(providerPathsReference))
+            val providerPaths = ProcessBuilder(
+                analyzer!!.absolutePath,
+                "resources",
+                "xml",
+                "--file",
+                "res/xml/$LEGACY_FILE_PROVIDER_PATHS_RESOURCE.xml",
+                artifact.absolutePath,
+            ).redirectErrorStream(true).start()
+            val providerPathsXml = providerPaths.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+            assertEquals(providerPathsXml, 0, providerPaths.waitFor())
+            listOf("files-path", "cache-path", "external-files-path", "external-cache-path").forEach { tag ->
+                assertTrue("Compiled provider paths missing $tag: $providerPathsXml", providerPathsXml.contains(tag))
+            }
         } finally {
             logger.removeHandler(handler)
             patch.options.values.forEach { it.reset() }
@@ -158,10 +234,10 @@ class LegacyAppCompatibilityArtifactTest {
                     }
                 }
                 messages.clear()
+                val artifact = apk.copyTo(File(output, "$name.apk"), overwrite = true)
                 Patcher(PatcherConfig(apk, File(output, "$name-work"))).use { patcher ->
                     patcher += setOf(verify)
                     runBlocking { patcher().collect { result -> result.exception?.let { throw it } } }
-                    val artifact = apk.copyTo(File(output, "$name.apk"), overwrite = true)
                     patcher.get().applyTo(artifact)
                 }
                 val options = messages.single { it.startsWith("Legacy App Compatibility options:") }

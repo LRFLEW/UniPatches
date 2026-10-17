@@ -11,6 +11,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.net.Uri;
 import android.content.res.AssetManager;
 import android.os.Environment;
 import android.util.Log;
@@ -101,6 +102,18 @@ public final class LegacyCompatRuntime {
     /** Stores the application context for later path redirects. */
     public static void init(Context context) {
         appContext = context != null ? context.getApplicationContext() : null;
+    }
+
+    /** Converts a verified file-share path into a private content URI. */
+    public static Uri fileUriForShare(File file) {
+        Context context = appContext;
+        if (context == null) throw new IllegalStateException("Legacy compatibility startup context is unavailable for file sharing");
+        return LegacyCompatFileProvider.getUriForFile(context, file);
+    }
+
+    /** Adds only the temporary read grant required by a content-URI share. */
+    public static void grantFileUriReadPermission(Intent intent) {
+        LegacyCompatFileProvider.grantReadPermission(intent);
     }
 
     static final class ExpansionMetadata {
