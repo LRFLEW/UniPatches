@@ -22,7 +22,26 @@ private val foregroundServiceTypePermissions = mapOf(
     "mediaProcessing" to "android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING",
 )
 private val supportedForegroundServiceTypes = foregroundServiceTypePermissions.keys + "shortService"
+private val foregroundServiceTypeMinimumApi = mapOf(
+    "camera" to 30,
+    "microphone" to 30,
+    "health" to 34,
+    "shortService" to 34,
+    "specialUse" to 34,
+    "systemExempted" to 34,
+    "remoteMessaging" to 35,
+    "mediaProcessing" to 35,
+)
 private val javaComponentName = Regex("""[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
+
+internal fun minimumForegroundServiceFrameworkApi(mappings: List<ForegroundServiceTypeMapping>): Int? =
+    mappings.flatMap { it.types }.maxOfOrNull { foregroundServiceTypeMinimumApi[it] ?: 28 }
+
+internal fun validateForegroundServiceMappingSelection(enabled: Boolean, mappings: List<ForegroundServiceTypeMapping>) {
+    require(!enabled || mappings.isNotEmpty()) {
+        "Legacy compatibility: FGS type repair is enabled but no service/type mappings were supplied."
+    }
+}
 
 internal fun normalizeForegroundServiceTypeMappings(
     entries: List<String>,

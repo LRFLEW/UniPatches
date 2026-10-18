@@ -19,6 +19,8 @@ import java.util.zip.ZipOutputStream
 import javax.xml.parsers.DocumentBuilderFactory
 
 class LegacyAppCompatibilityExpansionTest {
+    private val TEST_UNITY_ACTIVITY = "org.example.unitygame.CustomUnityActivity"
+
     @Test
     fun checksumMetadataDescribesTheFinalObbAsset() {
         val file = File.createTempFile("legacy-obb-checksum-", ".obb")
@@ -195,6 +197,71 @@ class LegacyAppCompatibilityExpansionTest {
     }
 
     @Test
+    fun refusesObbLibrariesThatWouldReplaceApkOrEarlierPatchLibraries() {
+        val source = File.createTempFile("legacy-collision-", ".obb")
+        val root = java.nio.file.Files.createTempDirectory("legacy-collision-root-").toFile()
+        val unity = "assets/libs/armeabi-v7a/libunity.so"
+        val mono = "assets/libs/armeabi-v7a/libmono.so"
+        val unityOutput = "lib/armeabi-v7a/libunity.so"
+        val monoOutput = "lib/armeabi-v7a/libmono.so"
+        ZipOutputStream(source.outputStream()).use { zip ->
+            listOf(unity, mono).forEach { entry ->
+                zip.putNextEntry(ZipEntry(entry))
+                zip.write(entry.toByteArray())
+                zip.closeEntry()
+            }
+        }
+        val originalObb = source.readBytes()
+        val unityFile = File(root, unityOutput).apply { parentFile.mkdirs(); writeText("APK proxy") }
+
+        assertTrue(assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionNativeLibraryDestinations(listOf(unity to unityOutput), setOf(unityOutput))
+        }.message!!.contains("overwrite existing APK libraries"))
+        ZipFile(source).use { zip ->
+            val failure = assertThrows(IllegalArgumentException::class.java) {
+                stageExpansionNativeLibraries(zip, listOf(unity to unityOutput, mono to monoOutput)) { File(root, it) }
+            }
+            assertTrue(failure.message!!.contains("staged output already exists"))
+        }
+        assertEquals("APK proxy", unityFile.readText())
+        assertFalse(File(root, monoOutput).exists())
+        assertArrayEquals(originalObb, source.readBytes())
+        source.delete()
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun rollsBackEarlierLibraryWhenLaterObbCopyFails() {
+        val source = File.createTempFile("legacy-copy-failure-", ".obb")
+        val root = java.nio.file.Files.createTempDirectory("legacy-copy-failure-root-").toFile()
+        val first = "assets/libs/armeabi-v7a/libfirst.so"
+        val second = "assets/libs/armeabi-v7a/libsecond.so"
+        ZipOutputStream(source.outputStream()).use { zip ->
+            listOf(first to "first-library", second to "second-library").forEach { (name, content) ->
+                zip.putNextEntry(ZipEntry(name))
+                zip.write(content.toByteArray())
+                zip.closeEntry()
+            }
+        }
+        val sourceBeforeStaging = source.readBytes()
+        File(root, "blocked-parent").writeText("not a directory")
+
+        assertThrows(Exception::class.java) {
+            ZipFile(source).use { zip ->
+                stageExpansionNativeLibraries(
+                    zip,
+                    listOf(first to "lib/armeabi-v7a/libfirst.so", second to "blocked-parent/libsecond.so"),
+                ) { File(root, it) }
+            }
+        }
+        assertFalse(File(root, "lib/armeabi-v7a/libfirst.so").exists())
+        assertFalse(File(root, "lib/armeabi-v7a/libsecond.so").exists())
+        assertArrayEquals(sourceBeforeStaging, source.readBytes())
+        source.delete()
+        root.deleteRecursively()
+    }
+
+    @Test
     fun writesExpansionUnderAssetDirectory() {
         assertEquals(
             "assets/unipatch-legacy-expansion/patch.456.org.example.legacy.obb",
@@ -229,10 +296,16 @@ class LegacyAppCompatibilityExpansionTest {
             unityLibrary to requireNotNull(expansionNativeDestination(unityLibrary)),
             monoLibrary to requireNotNull(expansionNativeDestination(monoLibrary)),
         )
-        ZipFile(source).use { zip ->
+        val staged = ZipFile(source).use { zip ->
             stageExpansionNativeLibraries(zip, nativeEntries) { destination -> File(stagedApkRoot, destination) }
         }
 
+        assertEquals(2, staged.size)
+        staged.forEach { library ->
+            assertEquals(library.sourceBytes, library.outputBytes)
+            assertEquals(library.sourceSha256, library.outputSha256)
+            assertEquals(library.outputSha256, expansionSha256(library.file))
+        }
         assertEquals("lib/armeabi-v7a/libunity.so", expansionNativeDestination(unityLibrary))
         assertEquals("lib/armeabi-v7a/libmono.so", expansionNativeDestination(monoLibrary))
         assertEquals("unity", File(stagedApkRoot, "lib/armeabi-v7a/libunity.so").readText())
@@ -256,28 +329,51 @@ class LegacyAppCompatibilityExpansionTest {
     }
 
     @Test
-    fun downloaderBypassRequiresDetectedUnityAndEmbeddedObb() {
-        validateExpansionDownloaderBypass(false, false, false, "")
-        validateExpansionDownloaderBypass(true, true, true, "/tmp/main.1.example.obb")
+    fun embeddingRequiresAnObbPath() {
+        validateEmbeddedExpansionObbSelection(selected = false, obbPath = "")
+        validateEmbeddedExpansionObbSelection(selected = true, obbPath = "/tmp/main.obb")
         assertTrue(assertThrows(IllegalArgumentException::class.java) {
-            validateExpansionDownloaderBypass(true, false, true, "/tmp/main.1.example.obb")
-        }.message!!.contains("no supported Unity engine was detected"))
-        assertTrue(assertThrows(IllegalArgumentException::class.java) {
-            validateExpansionDownloaderBypass(true, true, false, "/tmp/main.1.example.obb")
-        }.message!!.contains("requires OBB embedding"))
-        assertTrue(assertThrows(IllegalArgumentException::class.java) {
-            validateExpansionDownloaderBypass(true, true, true, "  ")
-        }.message!!.contains("requires OBB embedding"))
+            validateEmbeddedExpansionObbSelection(selected = true, obbPath = "  ")
+        }.message!!.contains("requires a selected OBB file"))
     }
 
     @Test
-    fun movesAllDownloaderLaunchersWithoutDuplicatingUnityLauncher() {
+    fun removingRelocatedEntriesRequiresRelocationAndEmbedding() {
+        validateExpansionObbRelocationOptions(relocate = true, embed = true, removeFromObb = true)
+        assertTrue(assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionObbRelocationOptions(relocate = false, embed = true, removeFromObb = true)
+        }.message!!.contains("requires both native-library relocation and OBB embedding"))
+        assertTrue(assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionObbRelocationOptions(relocate = true, embed = false, removeFromObb = true)
+        }.message!!.contains("requires both native-library relocation and OBB embedding"))
+    }
+
+    @Test
+    fun downloaderBypassRequiresDetectedUnityObbAndResolvedLaunchTarget() {
+        validateExpansionDownloaderBypass(false, false, false, "", null)
+        validateExpansionDownloaderBypass(true, true, true, "/tmp/main.1.example.obb", "org.example.unitygame.CustomUnityActivity")
+        assertTrue(assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionDownloaderBypass(true, false, true, "/tmp/main.1.example.obb", "org.example.unitygame.CustomUnityActivity")
+        }.message!!.contains("no supported Unity engine was detected"))
+        assertTrue(assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionDownloaderBypass(true, true, false, "/tmp/main.1.example.obb", "org.example.unitygame.CustomUnityActivity")
+        }.message!!.contains("requires OBB embedding"))
+        assertTrue(assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionDownloaderBypass(true, true, true, "  ", "org.example.unitygame.CustomUnityActivity")
+        }.message!!.contains("requires OBB embedding"))
+        assertTrue(assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionDownloaderBypass(true, true, true, "/tmp/main.1.example.obb", null)
+        }.message!!.contains("could not identify a unique Unity launch activity"))
+    }
+
+    @Test
+    fun movesAllDownloaderLaunchersToAnyDetectedUnityActivity() {
         val document = launcherDocument(unityHasLauncher = false, downloaderFilters = 2)
 
-        assertEquals(2, moveExpansionDownloaderLauncher(document, Logger.getLogger("test")))
+        assertEquals(2, moveExpansionDownloaderLauncher(document, Logger.getLogger("test"), TEST_UNITY_ACTIVITY))
         assertEquals(0, launcherFilterCount(activity(document, "com.google.android.vending.expansion.downloader_impl.DownloaderActivity")))
-        assertEquals(2, launcherFilterCount(activity(document, "com.glu.plugins.AUnityInstaller.UnityLauncherActivity")))
-        verifyExpansionDownloaderLauncher(document)
+        assertEquals(2, launcherFilterCount(activity(document, TEST_UNITY_ACTIVITY)))
+        verifyExpansionDownloaderLauncher(document, TEST_UNITY_ACTIVITY)
     }
 
     @Test
@@ -285,7 +381,7 @@ class LegacyAppCompatibilityExpansionTest {
         val document = launcherDocument(unityHasLauncher = false, downloaderFilters = 0)
 
         val failure = assertThrows(IllegalStateException::class.java) {
-            moveExpansionDownloaderLauncher(document, Logger.getLogger("test"))
+            moveExpansionDownloaderLauncher(document, Logger.getLogger("test"), TEST_UNITY_ACTIVITY)
         }
 
         assertTrue(failure.message!!.contains("no MAIN/LAUNCHER filter to transfer"))
@@ -295,9 +391,9 @@ class LegacyAppCompatibilityExpansionTest {
     fun keepsExistingUnityLauncherFilter() {
         val document = launcherDocument(unityHasLauncher = true, downloaderFilters = 1)
 
-        assertEquals(1, moveExpansionDownloaderLauncher(document, Logger.getLogger("test")))
-        assertEquals(1, launcherFilterCount(activity(document, "com.glu.plugins.AUnityInstaller.UnityLauncherActivity")))
-        verifyExpansionDownloaderLauncher(document)
+        assertEquals(1, moveExpansionDownloaderLauncher(document, Logger.getLogger("test"), TEST_UNITY_ACTIVITY))
+        assertEquals(1, launcherFilterCount(activity(document, TEST_UNITY_ACTIVITY)))
+        verifyExpansionDownloaderLauncher(document, TEST_UNITY_ACTIVITY)
     }
 
     private fun launcherDocument(unityHasLauncher: Boolean, downloaderFilters: Int): Document {
@@ -308,7 +404,7 @@ class LegacyAppCompatibilityExpansionTest {
         val downloader = document.createElement("activity")
         val unity = document.createElement("activity")
         downloader.setAttributeNS(NS_ANDROID, "android:name", "com.google.android.vending.expansion.downloader_impl.DownloaderActivity")
-        unity.setAttributeNS(NS_ANDROID, "android:name", "com.glu.plugins.AUnityInstaller.UnityLauncherActivity")
+        unity.setAttributeNS(NS_ANDROID, "android:name", ".CustomUnityActivity")
         manifest.appendChild(application)
         application.appendChild(downloader)
         application.appendChild(unity)
@@ -331,10 +427,25 @@ class LegacyAppCompatibilityExpansionTest {
         activity.appendChild(filter)
     }
 
-    private fun activity(document: Document, name: String): Element =
-        (0 until document.getElementsByTagName("activity").length)
+    private fun activity(document: Document, name: String): Element {
+        val packageName = document.documentElement.getAttribute("package")
+        val expected = when {
+            name.startsWith(".") -> packageName + name
+            '.' !in name -> "$packageName.$name"
+            else -> name
+        }
+        return (0 until document.getElementsByTagName("activity").length)
             .mapNotNull { document.getElementsByTagName("activity").item(it) as? Element }
-            .first { it.getAttributeNS(NS_ANDROID, "name") == name }
+            .first { element ->
+                val declared = element.getAttributeNS(NS_ANDROID, "name")
+                val resolved = when {
+                    declared.startsWith(".") -> packageName + declared
+                    '.' !in declared -> "$packageName.$declared"
+                    else -> declared
+                }
+                resolved == expected
+            }
+    }
 
     private fun launcherFilterCount(activity: Element): Int =
         (0 until activity.getElementsByTagName("intent-filter").length).count { index ->

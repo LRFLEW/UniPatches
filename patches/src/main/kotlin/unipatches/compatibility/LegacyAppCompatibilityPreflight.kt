@@ -46,16 +46,7 @@ internal fun legacyCompatibilityBytecodePreflightPatch(
             it.name == "checkAccess" && it.parameterTypes == listOf(licenseCallbackType) && it.returnType == "V"
         }
         val licenseInstructions = licenseMethod?.implementation?.instructions?.toList()
-        val licenseConstructors = licenseInstructions.orEmpty().mapIndexedNotNull { index, instruction ->
-            val reference = instruction as? ReferenceInstruction ?: return@mapIndexedNotNull null
-            if (isIntentStringConstructor(reference)) index to reference else null
-        }
-        val licenseRegisters = licenseConstructors.singleOrNull()?.second?.let(::intentStringConstructorRegisters)
-        val licenseExact = hasApkPureLicenseAction(licenseInstructions.orEmpty()) &&
-            licenseConstructors.size == 1 &&
-            licenseRegisters?.let {
-                licenseServiceIntentPackageBlock(it[0], it[1], licenseMethod?.implementation?.registerCount ?: 0) != null
-            } == true
+        val licenseBindingSupported = hasVerifiableLicenseServiceIntent(licenseInstructions.orEmpty())
         logger.info(
             formatLegacyCompatibilityPreflightFinding(
                 LegacyCompatibilityPreflightFinding(
@@ -63,8 +54,8 @@ internal fun legacyCompatibilityBytecodePreflightPatch(
                     detected = licenseClass != null,
                     proposal = "set the known LVL Intent package to com.android.vending; retain license verification",
                     apiRange = "device API $deviceApi; Android API 21+",
-                    confidence = if (licenseExact) "exact APKPure action, method, constructor, and register fingerprint" else "uncertain",
-                    uncertainty = if (licenseExact) "Play Store service availability and license result remain runtime-dependent" else "class, action, constructor count, or register encoding does not match; no auto-fix",
+                    confidence = if (licenseBindingSupported) "recognized Intent(String) bound by LicenseChecker.checkAccess" else "uncertain",
+                    uncertainty = if (licenseBindingSupported) "Play Store service availability and license result remain runtime-dependent" else "Intent constructor/bindService call shape is not safely recognized; no auto-fix",
                 ),
             ),
         )

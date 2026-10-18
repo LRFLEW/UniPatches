@@ -15,7 +15,8 @@ import org.w3c.dom.Element
 
 private const val EXPANSION_ASSET_DIRECTORY = "assets/unipatch-legacy-expansion"
 private val expansionFilePattern = Regex("(?:main|patch)\\.(\\d+)\\.([A-Za-z0-9_.]+)\\.obb")
-private val nativeEntryPattern = Regex("assets/libs/([^/]+)/([^/]+\\.so)")
+private val nativeEntryPattern = Regex("assets/libs/([A-Za-z0-9_-]+)/([A-Za-z0-9_.+-]+\\.so)")
+private val apkNativeEntryPattern = Regex("lib/([A-Za-z0-9_-]+)/([A-Za-z0-9_.+-]+\\.so)")
 
 internal data class LegacyExpansionOptions(
     val obbPath: String,
@@ -25,6 +26,11 @@ internal data class LegacyExpansionOptions(
 )
 
 internal fun expansionAssetPath(fileName: String): String = "$EXPANSION_ASSET_DIRECTORY/$fileName"
+
+internal fun isSafeApkNativeLibraryPath(path: String): Boolean = apkNativeEntryPattern.matches(path)
+
+private fun safeExpansionText(value: String): String =
+    value.map { if (Character.isISOControl(it)) ' ' else it }.joinToString("").take(240)
 
 internal fun expansionChecksumAssetPath(fileName: String): String = expansionAssetPath("$fileName.sha256")
 
@@ -40,7 +46,10 @@ internal fun expansionSha256(file: File): String {
             digest.update(buffer, 0, count)
         }
     }
-    val bytes = digest.digest()
+    return sha256Hex(digest.digest())
+}
+
+private fun sha256Hex(bytes: ByteArray): String {
     val hex = "0123456789abcdef"
     return buildString(bytes.size * 2) {
         for (byte in bytes) {
@@ -93,22 +102,22 @@ internal fun validateExpansionObbInput(
     }
     val source = File(selectedPath)
     require(source.isFile && source.canRead()) {
-        "Legacy compatibility: expansion OBB is missing or unreadable: ${source.absolutePath}"
+        "Legacy compatibility: expansion OBB is missing or unreadable: ${safeExpansionText(source.name)}"
     }
     require(isExpansionFileForPackage(source.name, packageName, expectedVersionCode)) {
         val version = expectedVersionCode?.takeIf { it.isNotBlank() }?.let { " versionCode $it" }.orEmpty()
-        "Legacy compatibility: OBB filename does not match APK package $packageName$version: ${source.name}"
+        "Legacy compatibility: OBB filename does not match APK package $packageName$version: ${safeExpansionText(source.name)}"
     }
     require(limits.maxArchiveBytes > 0 && limits.maxEntries > 0 && limits.maxEntryBytes >= 0 && limits.maxTotalExpandedBytes >= 0) {
         "Legacy compatibility: invalid expansion OBB validation limits."
     }
     require(source.length() <= limits.maxArchiveBytes) {
-        "Legacy compatibility: expansion OBB exceeds the ${limits.maxArchiveBytes}-byte archive limit: ${source.name}"
+        "Legacy compatibility: expansion OBB exceeds the ${limits.maxArchiveBytes}-byte archive limit: ${safeExpansionText(source.name)}"
     }
     try {
         ZipFile(source).use { zip ->
             require(zip.entries().hasMoreElements()) {
-                "Legacy compatibility: expansion OBB contains no entries: ${source.name}"
+                "Legacy compatibility: expansion OBB contains no entries: ${safeExpansionText(source.name)}"
             }
             var entryCount = 0
             var fileCount = 0
@@ -118,15 +127,15 @@ internal fun validateExpansionObbInput(
                 val entry = entries.nextElement()
                 entryCount++
                 require(entryCount <= limits.maxEntries) {
-                    "Legacy compatibility: expansion OBB exceeds the ${limits.maxEntries}-entry limit: ${source.name}"
+                    "Legacy compatibility: expansion OBB exceeds the ${limits.maxEntries}-entry limit: ${safeExpansionText(source.name)}"
                 }
                 if (entry.isDirectory) continue
                 fileCount++
                 require(entry.size >= 0 && entry.crc >= 0) {
-                    "Legacy compatibility: expansion OBB ZIP integrity metadata is incomplete for ${entry.name}."
+                    "Legacy compatibility: expansion OBB ZIP integrity metadata is incomplete for ${safeExpansionText(entry.name)}."
                 }
                 require(entry.size <= limits.maxEntryBytes) {
-                    "Legacy compatibility: expansion OBB entry ${entry.name} exceeds the ${limits.maxEntryBytes}-byte expanded limit."
+                    "Legacy compatibility: expansion OBB entry ${safeExpansionText(entry.name)} exceeds the ${limits.maxEntryBytes}-byte expanded limit."
                 }
                 require(entry.size <= limits.maxTotalExpandedBytes - totalExpandedBytes) {
                     "Legacy compatibility: expansion OBB exceeds the ${limits.maxTotalExpandedBytes}-byte total expanded limit."
@@ -139,11 +148,11 @@ internal fun validateExpansionObbInput(
                         val count = try {
                             input.read(buffer)
                         } catch (error: IllegalArgumentException) {
-                            throw IOException("Malformed ZIP entry data in ${entry.name}.", error)
+                            throw IOException("Malformed ZIP entry data in ${safeExpansionText(entry.name)}.", error)
                         }
                         if (count < 0) break
                         require(count.toLong() <= limits.maxEntryBytes - bytesRead) {
-                            "Legacy compatibility: expansion OBB entry ${entry.name} exceeds the ${limits.maxEntryBytes}-byte expanded limit."
+                            "Legacy compatibility: expansion OBB entry ${safeExpansionText(entry.name)} exceeds the ${limits.maxEntryBytes}-byte expanded limit."
                         }
                         require(count.toLong() <= limits.maxTotalExpandedBytes - totalExpandedBytes - bytesRead) {
                             "Legacy compatibility: expansion OBB exceeds the ${limits.maxTotalExpandedBytes}-byte total expanded limit."
@@ -153,12 +162,12 @@ internal fun validateExpansionObbInput(
                     }
                 }
                 require(bytesRead == entry.size && crc.value == entry.crc) {
-                    "Legacy compatibility: expansion OBB ZIP integrity check failed for ${entry.name}."
+                    "Legacy compatibility: expansion OBB ZIP integrity check failed for ${safeExpansionText(entry.name)}."
                 }
                 totalExpandedBytes += bytesRead
             }
             require(fileCount > 0) {
-                "Legacy compatibility: expansion OBB contains no files: ${source.name}"
+                "Legacy compatibility: expansion OBB contains no files: ${safeExpansionText(source.name)}"
             }
         }
     } catch (error: IOException) {
@@ -209,17 +218,101 @@ internal fun rewriteExpansionObb(source: File, output: File, removedEntries: Set
     }
 }
 
+internal data class StagedExpansionNativeLibrary(
+    val entryName: String,
+    val destination: String,
+    val sourceBytes: Long,
+    val outputBytes: Long,
+    val sourceSha256: String,
+    val outputSha256: String,
+    val file: File,
+)
+
+internal fun validateExpansionNativeLibraryDestinations(
+    nativeEntries: List<Pair<String, String>>,
+    existingApkEntries: Set<String>,
+) {
+    require(nativeEntries.all { (source, destination) ->
+        expansionNativeDestination(source) == destination && isSafeApkNativeLibraryPath(destination)
+    }) {
+        "Legacy compatibility: native-library relocation refused because an OBB source or destination path is unsafe."
+    }
+    val collisions = nativeEntries.filter { (_, destination) -> destination in existingApkEntries }
+    require(collisions.isEmpty()) {
+        "Legacy compatibility: native-library relocation refused because OBB entries would overwrite existing APK libraries: " +
+            collisions.joinToString { (source, destination) -> "${safeExpansionText(source)} -> ${safeExpansionText(destination)}" } +
+            ". Original proxy libraries and OBB entries were preserved; disable relocation or use a compatible OBB."
+    }
+}
+
 internal fun stageExpansionNativeLibraries(
     zip: ZipFile,
     nativeEntries: List<Pair<String, String>>,
     outputForDestination: (String) -> File,
-) {
-    for ((entryName, destination) in nativeEntries) {
-        val output = outputForDestination(destination)
-        output.parentFile?.mkdirs()
-        zip.getInputStream(zip.getEntry(entryName)).use { input ->
-            output.outputStream().use { outputStream -> input.copyTo(outputStream, DEFAULT_COPY_BUFFER) }
+): List<StagedExpansionNativeLibrary> {
+    require(nativeEntries.all { (source, destination) ->
+        expansionNativeDestination(source) == destination && isSafeApkNativeLibraryPath(destination)
+    }) {
+        "Legacy compatibility: native-library staging refused because an OBB source or destination path is unsafe."
+    }
+    require(nativeEntries.map { it.second }.toSet().size == nativeEntries.size) {
+        "Legacy compatibility: expansion OBB contains duplicate native-library destinations."
+    }
+    val outputs = nativeEntries.map { (entryName, destination) ->
+        val entry = zip.getEntry(entryName)
+            ?: throw IllegalArgumentException("Legacy compatibility: OBB native library entry is missing: ${safeExpansionText(entryName)}")
+        Triple(entryName, destination, entry to outputForDestination(destination))
+    }
+    val existingOutputs = outputs.filter { it.third.second.exists() }
+    require(existingOutputs.isEmpty()) {
+        "Legacy compatibility: native-library relocation refused because staged output already exists: " +
+            existingOutputs.joinToString { (entry, destination, _) -> "${safeExpansionText(entry)} -> ${safeExpansionText(destination)}" } +
+            ". Existing APK or patch-provided files were preserved."
+    }
+    val created = mutableListOf<File>()
+    try {
+        return outputs.map { (entryName, destination, entryAndFile) ->
+            val (entry, output) = entryAndFile
+            output.parentFile?.let { parent ->
+                require(parent.exists() || parent.mkdirs()) {
+                    "Legacy compatibility: cannot create native-library output directory for ${safeExpansionText(destination)}."
+                }
+            }
+            require(output.createNewFile()) {
+                "Legacy compatibility: native-library relocation refused because output already exists: ${safeExpansionText(destination)}."
+            }
+            created += output
+            require(entry.size >= 0) { "Legacy compatibility: OBB native library has unknown length: ${safeExpansionText(entryName)}" }
+            val sourceDigest = MessageDigest.getInstance("SHA-256")
+            var sourceBytes = 0L
+            zip.getInputStream(entry).use { input ->
+                output.outputStream().buffered().use { outputStream ->
+                    val buffer = ByteArray(DEFAULT_COPY_BUFFER)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        require(count.toLong() <= entry.size - sourceBytes) {
+                            "Legacy compatibility: OBB native library exceeds declared length: ${safeExpansionText(entryName)}"
+                        }
+                        sourceBytes += count
+                        sourceDigest.update(buffer, 0, count)
+                        outputStream.write(buffer, 0, count)
+                    }
+                }
+            }
+            require(sourceBytes == entry.size && output.length() == sourceBytes) {
+                "Legacy compatibility: OBB native library copy length mismatch: ${safeExpansionText(entryName)} -> ${safeExpansionText(destination)}"
+            }
+            val sourceSha256 = sha256Hex(sourceDigest.digest())
+            val outputSha256 = expansionSha256(output)
+            require(sourceSha256 == outputSha256) {
+                "Legacy compatibility: OBB native library copy checksum mismatch: ${safeExpansionText(entryName)} -> ${safeExpansionText(destination)}"
+            }
+            StagedExpansionNativeLibrary(entryName, destination, sourceBytes, output.length(), sourceSha256, outputSha256, output)
         }
+    } catch (error: Exception) {
+        created.forEach { output -> output.delete() }
+        throw error
     }
 }
 
@@ -241,11 +334,11 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
         if (!options.relocateNativeLibraries && !options.embedExpansionObb && !options.removeRelocatedNativeLibrariesFromObb) {
             return@execute
         }
-        require(
-            !options.removeRelocatedNativeLibrariesFromObb || (options.relocateNativeLibraries && options.embedExpansionObb),
-        ) {
-            "Legacy compatibility: removing relocated OBB libraries requires both native-library relocation and OBB embedding."
-        }
+        validateExpansionObbRelocationOptions(
+            relocate = options.relocateNativeLibraries,
+            embed = options.embedExpansionObb,
+            removeFromObb = options.removeRelocatedNativeLibrariesFromObb,
+        )
         val packageName = StartupHooks.resolvedPackageName
             ?: error("Legacy compatibility: cannot validate expansion OBB because APK package name could not be resolved.")
         val source = validateExpansionObbInput(options.obbPath, packageName, StartupHooks.resolvedVersionCode)
@@ -269,9 +362,12 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
                 require(nativeEntries.isNotEmpty()) {
                     "Legacy compatibility: requested native-library relocation, but OBB contains no assets/libs/<abi>/*.so entries."
                 }
-                stageExpansionNativeLibraries(zip, nativeEntries) { destination -> get(destination, false) }
-                nativeEntries.forEach { (entryName, destination) ->
-                    logger.info("Legacy compatibility: relocated OBB native library $entryName to $destination.")
+                validateExpansionNativeLibraryDestinations(nativeEntries, listApkEntries("lib/").toSet())
+                val stagedLibraries = stageExpansionNativeLibraries(zip, nativeEntries) { destination -> get(destination, false) }
+                stagedLibraries.forEach { staged ->
+                    logger.info(
+                        "Legacy compatibility: OBB native library staged source=${staged.entryName} destination=${staged.destination} abi=${staged.destination.removePrefix("lib/").substringBefore('/')} collision=none sourceBytes=${staged.sourceBytes} outputBytes=${staged.outputBytes} sourceSha256=${staged.sourceSha256} outputSha256=${staged.outputSha256}.",
+                    )
                 }
             }
         }
@@ -306,10 +402,7 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
     }
 }
 
-/**
- * Moves the standard Google expansion-downloader launcher to the GLU AUnityInstaller SDK activity.
- * This exact component fingerprint is shared by APKs using that library and is not package-gated.
- */
+/** Moves the standard expansion-downloader launcher to its DEX-identified Unity activity. */
 private fun Element.isExpansionLauncherFilter(): Boolean {
     if ((localName ?: tagName.substringAfter(':')) != "intent-filter") return false
     val actions = getElementsByTagName("action")
@@ -319,11 +412,24 @@ private fun Element.isExpansionLauncherFilter(): Boolean {
     return main && launcher
 }
 
+internal fun validateEmbeddedExpansionObbSelection(selected: Boolean, obbPath: String) {
+    require(!selected || obbPath.isNotBlank()) {
+        "Legacy compatibility: embedding an expansion OBB requires a selected OBB file."
+    }
+}
+
+internal fun validateExpansionObbRelocationOptions(relocate: Boolean, embed: Boolean, removeFromObb: Boolean) {
+    require(!removeFromObb || (relocate && embed)) {
+        "Legacy compatibility: removing relocated OBB libraries requires both native-library relocation and OBB embedding."
+    }
+}
+
 internal fun validateExpansionDownloaderBypass(
     selected: Boolean,
     unityDetected: Boolean,
     obbEmbeddingSelected: Boolean,
     obbPath: String,
+    launcherActivity: String?,
 ) {
     if (!selected) return
     require(unityDetected) {
@@ -332,42 +438,55 @@ internal fun validateExpansionDownloaderBypass(
     require(obbEmbeddingSelected && obbPath.isNotBlank()) {
         "Legacy compatibility: expansion downloader bypass requires OBB embedding and a valid selected OBB file."
     }
-}
-
-internal fun verifyExpansionDownloaderLauncher(document: Document) {
-    val application = document.documentElement?.getElementsByTagName("application")?.item(0) as? Element
-        ?: error("Legacy compatibility: downloader bypass readback failed; manifest application is missing.")
-    fun activity(name: String) = (0 until application.childNodes.length)
-        .mapNotNull { application.childNodes.item(it) as? Element }
-        .firstOrNull { it.tagName == "activity" && it.androidAttribute("name") == name }
-    val downloader = activity("com.google.android.vending.expansion.downloader_impl.DownloaderActivity")
-        ?: error("Legacy compatibility: downloader bypass readback failed; DownloaderActivity is missing.")
-    val unity = activity("com.glu.plugins.AUnityInstaller.UnityLauncherActivity")
-        ?: error("Legacy compatibility: downloader bypass readback failed; UnityLauncherActivity is missing.")
-    check(!downloader.isLauncherComponent() && unity.isLauncherComponent()) {
-        "Legacy compatibility: downloader bypass readback failed; expected DownloaderActivity without MAIN/LAUNCHER and UnityLauncherActivity with MAIN/LAUNCHER."
+    require(!launcherActivity.isNullOrBlank()) {
+        "Legacy compatibility: downloader bypass could not identify a unique Unity launch activity from the downloader DEX."
     }
 }
 
-internal fun moveExpansionDownloaderLauncher(document: Document, logger: Logger): Int {
+private fun manifestActivityName(name: String, packageName: String): String = when {
+    name.startsWith(".") -> packageName + name
+    '.' !in name -> "$packageName.$name"
+    else -> name
+}
+
+internal fun verifyExpansionDownloaderLauncher(document: Document, launcherActivityName: String) {
     val application = document.documentElement?.getElementsByTagName("application")?.item(0) as? Element
-        ?: error("Legacy compatibility: cannot bypass downloader; manifest application is missing.")
+        ?: error("Legacy compatibility: downloader bypass readback failed; manifest application is missing.")
+    val packageName = document.documentElement.getAttribute("package")
+    val targetName = manifestActivityName(launcherActivityName, packageName)
     fun activity(name: String) = (0 until application.childNodes.length)
         .mapNotNull { application.childNodes.item(it) as? Element }
-        .firstOrNull { it.tagName == "activity" && it.androidAttribute("name") == name }
+        .firstOrNull { it.tagName == "activity" && manifestActivityName(it.androidAttribute("name"), packageName) == name }
+    val downloader = activity(GOOGLE_EXPANSION_DOWNLOADER_ACTIVITY)
+        ?: error("Legacy compatibility: downloader bypass readback failed; DownloaderActivity is missing.")
+    val unity = activity(targetName)
+        ?: error("Legacy compatibility: downloader bypass readback failed; detected Unity activity '$targetName' is missing.")
+    check(!downloader.isLauncherComponent() && unity.isLauncherComponent()) {
+        "Legacy compatibility: downloader bypass readback failed; expected DownloaderActivity without MAIN/LAUNCHER and '$targetName' with MAIN/LAUNCHER."
+    }
+}
+
+internal fun moveExpansionDownloaderLauncher(document: Document, logger: Logger, launcherActivityName: String): Int {
+    val application = document.documentElement?.getElementsByTagName("application")?.item(0) as? Element
+        ?: error("Legacy compatibility: cannot bypass downloader; manifest application is missing.")
+    val packageName = document.documentElement.getAttribute("package")
+    val targetName = manifestActivityName(launcherActivityName, packageName)
+    fun activity(name: String) = (0 until application.childNodes.length)
+        .mapNotNull { application.childNodes.item(it) as? Element }
+        .firstOrNull { it.tagName == "activity" && manifestActivityName(it.androidAttribute("name"), packageName) == name }
     val activityNames = (0 until application.childNodes.length)
         .mapNotNull { application.childNodes.item(it) as? Element }
         .filter { it.tagName == "activity" }
         .map { it.androidAttribute("name") }
-    val downloader = activity("com.google.android.vending.expansion.downloader_impl.DownloaderActivity")
-        ?: error("Legacy compatibility: cannot bypass downloader; DownloaderActivity is missing. Activities=$activityNames")
-    val unity = activity("com.glu.plugins.AUnityInstaller.UnityLauncherActivity")
-        ?: error("Legacy compatibility: cannot bypass downloader; UnityLauncherActivity is missing.")
+    val downloader = activity(GOOGLE_EXPANSION_DOWNLOADER_ACTIVITY)
+        ?: error("Legacy compatibility: cannot bypass downloader; DownloaderActivity is missing. Activities=${activityNames.take(50)}")
+    val unity = activity(targetName)
+        ?: error("Legacy compatibility: cannot bypass downloader; detected Unity activity '$targetName' is not declared in the manifest.")
     val launcherFilters = (0 until downloader.childNodes.length)
         .mapNotNull { downloader.childNodes.item(it) as? Element }
         .filter(Element::isExpansionLauncherFilter)
     check(launcherFilters.isNotEmpty() || unity.isLauncherComponent()) {
-        "Legacy compatibility: cannot bypass downloader; DownloaderActivity has no MAIN/LAUNCHER filter to transfer and UnityLauncherActivity is not already the launcher."
+        "Legacy compatibility: cannot bypass downloader; DownloaderActivity has no MAIN/LAUNCHER filter to transfer and '$targetName' is not already the launcher."
     }
     if (!unity.isLauncherComponent()) {
         launcherFilters.forEach { filter ->
@@ -378,8 +497,8 @@ internal fun moveExpansionDownloaderLauncher(document: Document, logger: Logger)
         launcherFilters.forEach(downloader::removeChild)
     }
     unity.setAttributeNS(NS_ANDROID, "android:exported", "true")
-    verifyExpansionDownloaderLauncher(document)
-    logger.info("Legacy compatibility: transferred downloader launcher filter and verified manifest readback; UnityLauncherActivity is launcher.")
+    verifyExpansionDownloaderLauncher(document, targetName)
+    logger.info("Legacy compatibility: transferred downloader launcher filter and verified manifest readback; $targetName is launcher.")
     return launcherFilters.size
 }
 

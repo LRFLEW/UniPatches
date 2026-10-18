@@ -3,6 +3,7 @@ package unipatches.compatibility
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 import java.io.File
+import java.io.InputStream
 import java.net.IDN
 import java.util.Locale
 import javax.xml.XMLConstants
@@ -17,6 +18,12 @@ internal const val CLEAR_TEXT_NETWORK_SECURITY_RESOURCE = "legacy_compat_network
 internal fun validateCleartextModes(globalEnabled: Boolean, domainScopedEnabled: Boolean) {
     require(!(globalEnabled && domainScopedEnabled)) {
         "Legacy compatibility: choose either global cleartext access or selected-domain cleartext, not both."
+    }
+}
+
+internal fun validateCleartextDomainSelection(enabled: Boolean, domains: List<String>) {
+    require(!enabled || domains.isNotEmpty()) {
+        "Legacy compatibility: selected-domain cleartext requires at least one valid hostname; no APK changes were applied."
     }
 }
 
@@ -140,7 +147,9 @@ internal fun resolveNetworkSecurityConfigPaths(reference: String, entries: List<
 internal fun isCleartextDomainConfig(document: Document): Boolean =
     document.documentElement?.localNameOrTag() == NETWORK_SECURITY_CONFIG
 
-internal fun readSecureXml(file: File): Document {
+internal fun readSecureXml(file: File): Document = file.inputStream().use(::readSecureXml)
+
+internal fun readSecureXml(input: InputStream): Document {
     val factory = DocumentBuilderFactory.newInstance().apply {
         isNamespaceAware = true
         setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
@@ -150,7 +159,7 @@ internal fun readSecureXml(file: File): Document {
         setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
         setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
     }
-    return factory.newDocumentBuilder().parse(file)
+    return factory.newDocumentBuilder().parse(input)
 }
 
 internal fun writeSecureXml(document: Document, file: File) {

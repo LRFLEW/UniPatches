@@ -8,6 +8,18 @@ import javax.xml.parsers.DocumentBuilderFactory
 
 class LegacyAppCompatibilityNetworkSecurityTest {
     @Test
+    fun selectedDomainModeRequiresAtLeastOneHost() {
+        try {
+            validateCleartextDomainSelection(true, emptyList())
+            throw AssertionError("Expected empty selected-domain configuration to fail")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("at least one valid hostname"))
+        }
+        validateCleartextDomainSelection(false, emptyList())
+        validateCleartextDomainSelection(true, listOf("api.example.com"))
+    }
+
+    @Test
     fun cleartextModesRejectConflictingSelections() {
         validateCleartextModes(globalEnabled = false, domainScopedEnabled = false)
         validateCleartextModes(globalEnabled = true, domainScopedEnabled = false)

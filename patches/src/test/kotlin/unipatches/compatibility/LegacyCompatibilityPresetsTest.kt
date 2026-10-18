@@ -67,11 +67,16 @@ class LegacyCompatibilityPresetsTest {
         assertFalse(detectLegacyEngines(emptySet()).openIab)
     }
 
-    @Test fun unityDetectionRequiresExactPlayerPair() {
-        assertFalse(detectLegacyEngines(setOf("Lcom/unity3d/player/UnityPlayer;")).unity)
-        val engines = detectLegacyEngines(setOf("Lcom/unity3d/player/UnityPlayer;", "Lcom/unity3d/player/UnityPlayerActivity;"))
+    @Test fun unityDetectionUsesPlayerClassWithoutRequiringSpecificLauncher() {
+        val engines = detectLegacyEngines(setOf("Lcom/unity3d/player/UnityPlayer;"))
         assertTrue(engines.unity)
         assertFalse(engines.openIab)
+        assertFalse(detectLegacyEngines(setOf("Lcom/unity3d/player/UnityPlayerActivity;")).unity)
+        assertTrue(
+            detectLegacyEngines(
+                setOf("Lcom/unity3d/player/UnityPlayer;", "Lcom/example/CustomNativeActivity;"),
+            ).unity,
+        )
     }
 
     @Test(expected = IllegalArgumentException::class)

@@ -29,6 +29,17 @@ class LegacyAppCompatibilityForegroundServicesTest {
     private fun mapping(type: String = "mediaPlayback") = ForegroundServiceTypeMapping("com.example.app.SyncService", listOf(type))
 
     @Test
+    fun `enabled mapping requires at least one explicit service`() {
+        try {
+            validateForegroundServiceMappingSelection(true, emptyList())
+            fail("Expected empty FGS mapping selection to fail")
+        } catch (_: IllegalArgumentException) {
+            // expected
+        }
+        validateForegroundServiceMappingSelection(false, emptyList())
+    }
+
+    @Test
     fun `normalizes explicit component mappings and trims deduplicates types`() {
         assertEquals(
             listOf(ForegroundServiceTypeMapping("com.example.app.SyncService", listOf("dataSync", "mediaPlayback"))),

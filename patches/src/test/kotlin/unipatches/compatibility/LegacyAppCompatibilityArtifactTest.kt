@@ -13,36 +13,33 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Assume.assumeNotNull
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.security.MessageDigest
+import java.util.zip.ZipFile
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 import java.util.logging.Logger
 import javax.xml.parsers.DocumentBuilderFactory
 
-/** Opt-in real-APK coverage: LEGACY_TEST_APK=/path/to/com.glu.gunbros2.apk ./gradlew :patches:test --rerun-tasks. */
+/** Opt-in real-APK coverage: LEGACY_TEST_APK=/path/to/com.glu.gunbros2.apk LEGACY_TEST_OBB=/path/to/main.123.com.glu.gunbros2.obb ./gradlew :patches:test --rerun-tasks. */
 class LegacyAppCompatibilityArtifactTest {
-    @Test fun patchedGunBrosArtifactContainsExplicitLvlPackageAndUnityLauncher() {
+    @Test fun patchedGunBrosArtifactPreservesDownloaderAndExplicitLvlBinding() {
         val apkPath = System.getenv("LEGACY_TEST_APK")
-        val obbPath = System.getenv("LEGACY_TEST_OBB")
-        assumeNotNull(apkPath, obbPath)
+        assumeNotNull(apkPath)
         val apk = File(apkPath!!)
-        val obb = File(obbPath!!)
         require(apk.isFile) { "LEGACY_TEST_APK must point to Gun Bros 2 APK" }
-        require(obb.isFile) { "LEGACY_TEST_OBB must point to Gun Bros 2 OBB" }
         val analyzer = findApkAnalyzer()
         org.junit.Assume.assumeTrue("Set APKANALYZER or ANDROID_HOME to inspect compiled manifest", analyzer != null)
 
         val patch = legacyAppCompatibilityPatch
         patch.options.values.forEach { it.reset() }
-        patch.options["legacyCompatibilitySpoofTargetSdk"] = true
-        patch.options["legacyCompatibilityTargetSdk"] = 34
+        patch.options["legacyCompatibilitySpoofTargetSdk"] = false
+        patch.options["legacyCompatibilityTargetSdk"] = 24
         patch.options["legacyCompatibilityPlayStoreVisibility"] = true
         patch.options["legacyCompatibilityPackageVisibilityAllowlist"] = listOf("com.android.vending", "com.google.android.gms")
-        patch.options["legacyCompatibilityEmbedExpansionObb"] = true
-        patch.options["legacyCompatibilityBypassExpansionDownloader"] = true
-        patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
         patch.options["legacyCompatibilityRepairFileUriSharing"] = true
         val messages = mutableListOf<String>()
         val handler = object : Handler() {
@@ -53,7 +50,7 @@ class LegacyAppCompatibilityArtifactTest {
         val logger = Logger.getLogger("")
         logger.addHandler(handler)
         val output = File("build/legacy-artifacts").apply { mkdirs() }
-        val artifact = File(output, "gun-bros2-bypass-verified.apk")
+        val artifact = File(output, "gun-bros2-license-preserved.apk")
         try {
             Patcher(PatcherConfig(apk, File(output, "gun-bros2-bypass-work"))).use { patcher ->
                 patcher += setOf(patch)
@@ -131,20 +128,27 @@ class LegacyAppCompatibilityArtifactTest {
             assertEquals(String(compiledManifest, Charsets.UTF_8), 0, manifestOutput.waitFor())
             val manifest = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
                 .newDocumentBuilder().parse(ByteArrayInputStream(compiledManifest))
-            verifyExpansionDownloaderLauncher(manifest)
+            assertTrue(hasLauncher(manifest, "com.google.android.vending.expansion.downloader_impl.DownloaderActivity"))
+            assertFalse(hasLauncher(manifest, "com.glu.plugins.AUnityInstaller.UnityLauncherActivity"))
             val application = manifest.getElementsByTagName("application").item(0) as org.w3c.dom.Element
             val packageQueries = (0 until manifest.getElementsByTagName("package").length).map { index ->
                 (manifest.getElementsByTagName("package").item(index) as org.w3c.dom.Element).getAttributeNS(NS_ANDROID, "name")
             }.toSet()
-            assertTrue(packageQueries.containsAll(setOf("com.android.vending", "com.google.android.gms")))
+            assertEquals(16, originalTargetSdk(manifest))
+            assertTrue(packageQueries.isEmpty())
             assertEquals(0, manifest.getElementsByTagName("uses-permission").let { permissions ->
                 (0 until permissions.length).count { index ->
                     (permissions.item(index) as org.w3c.dom.Element).getAttributeNS(NS_ANDROID, "name") == "android.permission.QUERY_ALL_PACKAGES"
                 }
             })
-            assertTrue(messages.any { it.contains("package visibility queries verified") })
-            assertTrue(messages.any { it.contains("LicenseChecker.checkAccess patch verified") })
-            assertTrue(messages.any { it.contains("downloader bypass manifest verified after transformation") })
+            assertApkNativeLibrariesUnchanged(apk, artifact)
+            ZipFile(artifact).use { patched ->
+                assertNull(patched.getEntry(expansionAssetPath("main.123.com.glu.gunbros2.obb")))
+            }
+            assertTrue(messages.any { it.contains("package visibility queries require effective targetSdk 30+") && it.contains("target=16") })
+            assertTrue(messages.any { it.contains("JNI entrypoints=unknown") })
+            assertTrue(messages.any { it.contains("runtime loader outcome remain unknown") })
+            assertTrue(messages.any { it.contains("original service action retained") && it.contains("license verification remains enabled") })
             assertTrue(messages.any { it.contains("private file-sharing provider verified") })
             val provider = (0 until manifest.getElementsByTagName("provider").length)
                 .map { manifest.getElementsByTagName("provider").item(it) as org.w3c.dom.Element }
@@ -176,6 +180,93 @@ class LegacyAppCompatibilityArtifactTest {
         }
     }
 
+    @Test fun targetSdk23OrNewerRejectsGunBrosTextRelocations() {
+        val input = System.getenv("LEGACY_TEST_APK")
+        assumeNotNull(input)
+        val apk = File(input!!)
+        require(apk.isFile) { "LEGACY_TEST_APK must point to Gun Bros 2 APK" }
+        val patch = legacyAppCompatibilityPatch
+        patch.options.values.forEach { it.reset() }
+        try {
+            patch.options["legacyCompatibilitySpoofTargetSdk"] = true
+            patch.options["legacyCompatibilityTargetSdk"] = 24
+            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/textrel-target24"), patch)
+            assertNotNull("TargetSdk 24 artifact must fail closed for Gun Bros DT_TEXTREL", failure)
+            assertTrue(failure!!.contains("DT_TEXTREL"))
+            assertTrue(failure.contains("targetSdk 24"))
+        } finally {
+            patch.options.values.forEach { it.reset() }
+        }
+    }
+
+    @Test fun gunBrosEmbeddingObbFailsWhenItWouldSkipLicenseVerification() {
+        val input = System.getenv("LEGACY_TEST_APK")
+        val obbPath = System.getenv("LEGACY_TEST_OBB")
+        assumeNotNull(input, obbPath)
+        val apk = File(input!!)
+        val obb = File(obbPath!!)
+        require(apk.isFile && obb.isFile) { "Set LEGACY_TEST_APK and LEGACY_TEST_OBB to the original Gun Bros 2 artifacts" }
+        val originalObbSha256 = expansionSha256(obb)
+        val patch = legacyAppCompatibilityPatch
+        patch.options.values.forEach { it.reset() }
+        try {
+            patch.options["legacyCompatibilityEmbedExpansionObb"] = true
+            patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
+            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/lvl-obb-embed"), patch)
+            assertNotNull("Pre-staging OBB must not make the recognized downloader skip LVL", failure)
+            assertTrue(failure!!.contains("pre-staging the OBB"))
+            assertEquals(originalObbSha256, expansionSha256(obb))
+        } finally {
+            patch.options.values.forEach { it.reset() }
+        }
+    }
+
+    @Test fun gunBrosDownloaderBypassFailsWhenItWouldSkipLicenseVerification() {
+        val input = System.getenv("LEGACY_TEST_APK")
+        val obbPath = System.getenv("LEGACY_TEST_OBB")
+        assumeNotNull(input, obbPath)
+        val apk = File(input!!)
+        val obb = File(obbPath!!)
+        require(apk.isFile && obb.isFile) { "Set LEGACY_TEST_APK and LEGACY_TEST_OBB to the original Gun Bros 2 artifacts" }
+        val patch = legacyAppCompatibilityPatch
+        patch.options.values.forEach { it.reset() }
+        try {
+            patch.options["legacyCompatibilityBypassExpansionDownloader"] = true
+            patch.options["legacyCompatibilityEmbedExpansionObb"] = true
+            patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
+            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/lvl-bypass"), patch)
+            assertNotNull("Gun Bros downloader bypass must not make LVL unreachable", failure)
+            assertTrue(failure!!.contains("license verification cannot be proven"))
+        } finally {
+            patch.options.values.forEach { it.reset() }
+        }
+    }
+
+    @Test fun gunBrosNativeRelocationRejectsExistingProxyLibrariesAndPreservesObb() {
+        val input = System.getenv("LEGACY_TEST_APK")
+        val obbPath = System.getenv("LEGACY_TEST_OBB")
+        assumeNotNull(input, obbPath)
+        val apk = File(input!!)
+        val obb = File(obbPath!!)
+        require(apk.isFile && obb.isFile) { "Set LEGACY_TEST_APK and LEGACY_TEST_OBB to the original Gun Bros 2 artifacts" }
+        val originalObbSha256 = expansionSha256(obb)
+        val patch = legacyAppCompatibilityPatch
+        patch.options.values.forEach { it.reset() }
+        try {
+            patch.options["legacyCompatibilitySpoofTargetSdk"] = false
+            patch.options["legacyCompatibilityTargetSdk"] = 24
+            patch.options["legacyCompatibilityRelocateExpansionNativeLibraries"] = true
+            patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
+            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/native-collision"), patch)
+            assertNotNull("Relocation must refuse Gun Bros APK proxy-library collisions", failure)
+            assertTrue(failure!!.contains("overwrite existing APK libraries"))
+            assertTrue(failure.contains("lib/armeabi-v7a/libunity.so") || failure.contains("lib/armeabi-v7a/libmono.so"))
+            assertEquals(originalObbSha256, expansionSha256(obb))
+        } finally {
+            patch.options.values.forEach { it.reset() }
+        }
+    }
+
     @Test fun selectedOptionsReachDependenciesAndCompiledArtifacts() {
         val input = System.getenv("LEGACY_TEST_APK")
         assumeNotNull(input)
@@ -193,34 +284,28 @@ class LegacyAppCompatibilityArtifactTest {
         logger.addHandler(handler)
         try {
             for ((name, target, preset) in listOf(
-                Triple("target24", 24, "custom"),
-                Triple("target34", 34, "android_4_x"),
+                Triple("source16", 16, "custom"),
                 Triple("disabled", 0, "custom"),
                 Triple("diagnostics", -1, "android_14_plus"),
             )) {
                 patch.options.values.forEach { it.reset() }
                 patch.options["legacyCompatibilityPreset"] = preset
-                patch.options["legacyCompatibilitySpoofTargetSdk"] = target != 0
+                patch.options["legacyCompatibilitySpoofTargetSdk"] = target > 16 || target == -1
                 patch.options["legacyCompatibilityTargetSdk"] = if (target > 0) target else 34
                 patch.options["legacyCompatibilityRepairExportFlags"] = true
                 patch.options["legacyCompatibilityDiagnosticsOnly"] = target == -1
                 if (target == -1) {
                     // These must survive era selection but must not run in diagnostics-only mode.
-                    patch.options["legacyCompatibilityEmbedExpansionObb"] = true
-                    patch.options["legacyCompatibilityRelocateExpansionNativeLibraries"] = true
-                    patch.options["legacyCompatibilityRemoveRelocatedNativeLibrariesFromObb"] = true
-                    patch.options["legacyCompatibilityBypassExpansionDownloader"] = true
-                    patch.options["legacyCompatibilityExpansionObbPath"] = "/missing/main.123.com.glu.gunbros2.obb"
                     patch.options["legacyCompatibilityHiddenApi"] = true
                     patch.options["legacyCompatibilityOpenIabReceiverRegistrationMode"] = OPEN_IAB_FORCE
                 }
-                val expected = if (target > 0) target else 16
+                val expected = if (target > 16) target else 16
                 val verify = resourcePatch {
                     dependsOn(patch)
                     execute {
                         get("AndroidManifest.xml", false).inputStream().use { inputStream ->
                             document(inputStream).use { manifest ->
-                                assertEquals(expected, originalTargetSdk(manifest))
+                                assertEquals("case=$name target=$target messages=$messages", expected, originalTargetSdk(manifest))
                                 if (expected >= 31) for (tag in exportedComponentTags) {
                                     val components = manifest.getElementsByTagName(tag)
                                     for (i in 0 until components.length) {
@@ -245,10 +330,11 @@ class LegacyAppCompatibilityArtifactTest {
                 assertFalse(options.contains("effective"))
                 assertTrue(options.contains("targetSdk=${if (target > 0) target else 34}"))
                 if (target == -1) {
-                    for (name in listOf("embedExpansionObb", "relocateExpansionNativeLibraries", "removeRelocatedNativeLibrariesFromObb", "bypassExpansionDownloader"))
-                        assertTrue(options.contains("$name=true"))
-                    assertTrue(options.contains("expansionObbPath=main.123.com.glu.gunbros2.obb"))
+                    assertTrue(options.contains("bypassHiddenApi=true"))
                     assertTrue(options.contains("openIabReceiverRegistrationMode=force"))
+                    assertTrue(messages.any { it.contains("diagnostics-only mode applied no APK changes") })
+                    assertTrue(messages.any { it.contains("package visibility queries requires API 30") && it.contains("No newer manifest attributes were applied in diagnostics-only mode") })
+                    assertTrue(messages.any { it.contains("native libraries would be unsafe at planned targetSdk 34") && it.contains("not applied in diagnostics-only mode") && it.contains("DT_TEXTREL") })
                     assertFalse(messages.any { it.contains("injected LegacyCompatRuntime") })
                 }
             }
@@ -256,6 +342,104 @@ class LegacyAppCompatibilityArtifactTest {
             logger.removeHandler(handler)
             patch.options.values.forEach { it.reset() }
         }
+    }
+
+    @Test fun sourceFrameworkPreflightRejectsModernAttributesBeforeStockPatcherEncoder() {
+        val input = System.getenv("LEGACY_TEST_APK") ?: return
+        val apk = File(input)
+        assumeTrue(apk.isFile)
+        val patch = legacyAppCompatibilityPatch
+        patch.options.values.forEach { it.reset() }
+        try {
+            patch.options["legacyCompatibilitySpoofTargetSdk"] = true
+            patch.options["legacyCompatibilityTargetSdk"] = 34
+            patch.options["legacyCompatibilityPlayStoreVisibility"] = true
+            patch.options["legacyCompatibilityPackageVisibilityAllowlist"] = listOf("com.android.vending")
+            patch.options["legacyCompatibilityAllowSelectedCleartextDomains"] = true
+            patch.options["legacyCompatibilityCleartextDomains"] = listOf("api.example.com")
+            patch.options["legacyCompatibilityApplyForegroundServiceTypes"] = true
+            patch.options["legacyCompatibilityForegroundServiceTypeMappings"] = listOf(
+                "com.google.android.vending.expansion.downloader_impl.GDownloaderService=dataSync",
+            )
+            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/framework-gate"), patch)
+            assertNotNull("legacy framework gate must reject attributes unavailable to input framework", failure)
+            assertTrue(failure!!.contains("select as low as 16"))
+            assertTrue(failure.contains("package visibility queries requires API 30"))
+            assertTrue(failure.contains("domain-scoped cleartext requires API 24"))
+            assertTrue(failure.contains("foregroundServiceType requires API 28"))
+            assertFalse(failure.contains("Unknown attribute name"))
+        } finally {
+            patch.options.values.forEach { it.reset() }
+        }
+    }
+
+    private fun runPatcherFailure(apk: File, work: File, patch: app.morphe.patcher.patch.Patch<*>): String? {
+        val failure = runCatching {
+            Patcher(PatcherConfig(apk, work)).use { patcher ->
+                patcher += setOf(patch)
+                runBlocking { patcher().collect { result -> result.exception?.let { throw it } } }
+            }
+        }.exceptionOrNull() ?: return null
+        return generateSequence(failure) { it.cause }.joinToString("\\n") { it.message.orEmpty() }
+    }
+
+    private fun hasLauncher(document: org.w3c.dom.Document, activityName: String): Boolean {
+        val activities = document.getElementsByTagName("activity")
+        return (0 until activities.length).any { index ->
+            val activity = activities.item(index) as? org.w3c.dom.Element ?: return@any false
+            if (activity.getAttributeNS(NS_ANDROID, "name") != activityName) return@any false
+            val filters = activity.getElementsByTagName("intent-filter")
+            (0 until filters.length).any { filterIndex ->
+                val filter = filters.item(filterIndex) as? org.w3c.dom.Element ?: return@any false
+                val hasMain = (0 until filter.getElementsByTagName("action").length).any { actionIndex ->
+                    (filter.getElementsByTagName("action").item(actionIndex) as? org.w3c.dom.Element)
+                        ?.getAttributeNS(NS_ANDROID, "name") == "android.intent.action.MAIN"
+                }
+                val hasLauncher = (0 until filter.getElementsByTagName("category").length).any { categoryIndex ->
+                    (filter.getElementsByTagName("category").item(categoryIndex) as? org.w3c.dom.Element)
+                        ?.getAttributeNS(NS_ANDROID, "name") == "android.intent.category.LAUNCHER"
+                }
+                hasMain && hasLauncher
+            }
+        }
+    }
+
+    private fun assertApkNativeLibrariesUnchanged(originalApk: File, patchedApk: File) {
+        val nativeLibraryPaths = listOf("lib/armeabi-v7a/libmono.so", "lib/armeabi-v7a/libunity.so")
+        ZipFile(originalApk).use { original ->
+            ZipFile(patchedApk).use { patched ->
+                nativeLibraryPaths.forEach { path ->
+                    assertEquals("APK native library changed at $path", zipEntryDigest(original, path), zipEntryDigest(patched, path))
+                }
+            }
+        }
+    }
+
+    private fun zipEntryDigest(zip: ZipFile, path: String): Pair<Long, String> {
+        val entry = zip.getEntry(path) ?: error("Missing ZIP entry $path")
+        return zip.getInputStream(entry).use(::streamDigest)
+    }
+
+    private fun streamDigest(input: java.io.InputStream): Pair<Long, String> {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            total += count
+            digest.update(buffer, 0, count)
+        }
+        val hex = "0123456789abcdef"
+        val bytes = digest.digest()
+        val hash = buildString(bytes.size * 2) {
+            for (byte in bytes) {
+                val value = byte.toInt() and 0xff
+                append(hex[value ushr 4])
+                append(hex[value and 0x0f])
+            }
+        }
+        return total to hash
     }
 
     private fun findApkAnalyzer(): File? {

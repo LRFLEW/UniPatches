@@ -240,6 +240,42 @@ private fun stringRegisterBefore(
 
 internal data class ShareConsumer(val index: Int, val intentRegister: Int)
 
+private fun instructionWritesRegister(instruction: Instruction, register: Int): Boolean = when (instruction) {
+    is FiveRegisterInstruction, is RegisterRangeInstruction -> false
+    is ThreeRegisterInstruction -> !instruction.opcode.name.startsWith("APUT") && register == instruction.registerA
+    is TwoRegisterInstruction -> !instruction.opcode.name.startsWith("IF_") && !instruction.opcode.name.startsWith("IPUT") && register == instruction.registerA
+    is OneRegisterInstruction -> when {
+        instruction.opcode.name.startsWith("CONST") || instruction.opcode.name.startsWith("MOVE_RESULT") ||
+            instruction.opcode.name == "MOVE_EXCEPTION" || instruction.opcode.name.startsWith("NEW_INSTANCE") ||
+            instruction.opcode.name.startsWith("SGET") -> register == instruction.registerA
+        instruction.opcode.name == "CHECK_CAST" -> register == instruction.registerA
+        else -> false
+    }
+    else -> false
+}
+
+private fun instructionReadsRegister(instruction: Instruction, register: Int): Boolean = when (instruction) {
+    is FiveRegisterInstruction -> register in listOf(instruction.registerC, instruction.registerD, instruction.registerE, instruction.registerF, instruction.registerG).take(instruction.registerCount)
+    is RegisterRangeInstruction -> register >= instruction.startRegister && register < instruction.startRegister + instruction.registerCount
+    is ThreeRegisterInstruction -> if (instruction.opcode.name.startsWith("APUT")) {
+        register == instruction.registerA || register == instruction.registerB || register == instruction.registerC
+    } else register == instruction.registerB || register == instruction.registerC
+    is TwoRegisterInstruction -> when {
+        instruction.opcode.name.startsWith("MOVE") -> register == instruction.registerB
+        instruction.opcode.name.startsWith("IF_") || instruction.opcode.name.startsWith("IPUT") ->
+            register == instruction.registerA || register == instruction.registerB
+        instruction.opcode.name.endsWith("_2ADDR") -> register == instruction.registerA || register == instruction.registerB
+        else -> register == instruction.registerB
+    }
+    is OneRegisterInstruction -> when {
+        instruction.opcode.name.startsWith("CONST") || instruction.opcode.name.startsWith("MOVE_RESULT") ||
+            instruction.opcode.name == "MOVE_EXCEPTION" || instruction.opcode.name.startsWith("NEW_INSTANCE") ||
+            instruction.opcode.name.startsWith("SGET") -> false
+        else -> register == instruction.registerA
+    }
+    else -> false
+}
+
 private fun instructionUsesRegister(instruction: Instruction, register: Int): Boolean = when (instruction) {
     is FiveRegisterInstruction -> register in listOf(instruction.registerC, instruction.registerD, instruction.registerE, instruction.registerF, instruction.registerG).take(instruction.registerCount)
     is RegisterRangeInstruction -> register >= instruction.startRegister && register < instruction.startRegister + instruction.registerCount
@@ -265,7 +301,13 @@ internal fun fileUriShareConsumer(instructions: List<Instruction>, uriResultInde
                     registers[2] == uriRegister && stringRegisterBefore(instructions, consumerIndex, registers[1]) == "android.intent.extra.STREAM"
                 else -> false
             }
-            if (usesUri) return ShareConsumer(consumerIndex, registers[0])
+            if (usesUri) {
+                for (later in instructions.drop(consumerIndex + 1)) {
+                    if (instructionReadsRegister(later, uriRegister)) return null
+                    if (instructionWritesRegister(later, uriRegister)) break
+                }
+                return ShareConsumer(consumerIndex, registers[0])
+            }
         }
         if (instructionUsesRegister(consumer, uriRegister)) return null
         if (consumer.opcode.name.startsWith("IF_") || consumer.opcode.name.startsWith("GOTO") ||

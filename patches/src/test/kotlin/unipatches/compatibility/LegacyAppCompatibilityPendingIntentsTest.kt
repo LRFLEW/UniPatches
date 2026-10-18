@@ -1,7 +1,6 @@
 package unipatches.compatibility
 
 import com.android.tools.smali.dexlib2.Opcode
-import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction11x
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21c
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21ih
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction35c
@@ -11,6 +10,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstructio
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -71,47 +71,14 @@ class LegacyAppCompatibilityPendingIntentsTest {
     }
 
     @Test
-    fun apkpureLicenseCheckerActionFixtureMatchesAndFailsClosedOnDrift() {
-        val originalAction = BuilderInstruction21c(
+    fun licenseServiceBindingPreservesAnyOriginalActionAndScopesBoundIntent() {
+        val action = BuilderInstruction21c(
             Opcode.CONST_STRING,
             4,
-            ImmutableStringReference(APKPURE_LICENSE_ACTION_BASE64),
-        )
-        val changedAction = BuilderInstruction21c(
-            Opcode.CONST_STRING,
-            4,
-            ImmutableStringReference("com.example.other.Service"),
-        )
-
-        assertTrue(hasApkPureLicenseAction(listOf(originalAction)))
-        assertFalse(hasApkPureLicenseAction(listOf(changedAction)))
-    }
-
-    @Test
-    fun licenseServiceIntentIsScopedToPlayWithoutReplacingLicenseAction() {
-        assertEquals(
-            """
-                invoke-direct {v2, v3}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
-                const-string v9, "com.android.vending"
-                invoke-virtual {v2, v9}, Landroid/content/Intent;->setPackage(Ljava/lang/String;)Landroid/content/Intent;
-            """.trimIndent(),
-            licenseServiceIntentPackageBlock(intentRegister = 2, actionRegister = 3, packageRegister = 9),
-        )
-    }
-
-    @Test
-    fun explicitPlayPackageVerifierChecksSameIntentAndPreservesLicenseAction() {
-        val decode = BuilderInstruction35c(
-            Opcode.INVOKE_STATIC, 1, 4, 0, 0, 0, 0,
-            ImmutableMethodReference("Lcom/google/android/vending/licensing/util/Base64;", "decode", listOf("Ljava/lang/String;"), "[B"),
-        )
-        val decodedBytes = BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 5)
-        val stringConstructor = BuilderInstruction35c(
-            Opcode.INVOKE_DIRECT, 2, 3, 5, 0, 0, 0,
-            ImmutableMethodReference("Ljava/lang/String;", "<init>", listOf("[B"), "V"),
+            ImmutableStringReference("com.example.licensing.Service"),
         )
         val constructor = BuilderInstruction35c(
-            Opcode.INVOKE_DIRECT, 2, 2, 3, 0, 0, 0,
+            Opcode.INVOKE_DIRECT, 2, 2, 4, 0, 0, 0,
             ImmutableMethodReference("Landroid/content/Intent;", "<init>", listOf("Ljava/lang/String;"), "V"),
         )
         val packageString = BuilderInstruction21c(Opcode.CONST_STRING, 9, ImmutableStringReference("com.android.vending"))
@@ -119,7 +86,6 @@ class LegacyAppCompatibilityPendingIntentsTest {
             Opcode.INVOKE_VIRTUAL, 2, 2, 9, 0, 0, 0,
             ImmutableMethodReference("Landroid/content/Intent;", "setPackage", listOf("Ljava/lang/String;"), "Landroid/content/Intent;"),
         )
-        val licenseAction = BuilderInstruction21c(Opcode.CONST_STRING, 4, ImmutableStringReference(APKPURE_LICENSE_ACTION_BASE64))
         val bindService = BuilderInstruction35c(
             Opcode.INVOKE_VIRTUAL, 4, 1, 2, 6, 7, 0,
             ImmutableMethodReference(
@@ -134,18 +100,66 @@ class LegacyAppCompatibilityPendingIntentsTest {
                 listOf("Landroid/content/Intent;", "Landroid/content/ServiceConnection;", "I"), "Z",
             ),
         )
+        val instructions = listOf(action, constructor, packageString, setPackage, bindService)
+        assertTrue(hasVerifiableLicenseServiceIntent(instructions))
+        assertTrue(hasPlayScopedLicenseServiceIntent(instructions))
+        assertFalse(hasPlayScopedLicenseServiceIntent(instructions.dropLast(1) + wrongIntentBind))
+    }
 
-        val otherIntentSetPackage = BuilderInstruction35c(
-            Opcode.INVOKE_VIRTUAL, 2, 5, 9, 0, 0, 0,
-            ImmutableMethodReference("Landroid/content/Intent;", "setPackage", listOf("Ljava/lang/String;"), "Landroid/content/Intent;"),
+    @Test
+    fun licenseServiceIntentIsScopedToPlayWithoutReplacingLicenseAction() {
+        assertEquals(
+            """
+                invoke-direct {v2, v3}, Landroid/content/Intent;-><init>(Ljava/lang/String;)V
+                const-string v9, "com.android.vending"
+                invoke-virtual {v2, v9}, Landroid/content/Intent;->setPackage(Ljava/lang/String;)Landroid/content/Intent;
+            """.trimIndent(),
+            licenseServiceIntentPackageBlock(intentRegister = 2, actionRegister = 3, packageRegister = 9),
         )
-        val validBinding = listOf(licenseAction, decode, decodedBytes, stringConstructor, constructor, packageString, setPackage, bindService)
-        assertTrue(hasPlayScopedLicenseServiceIntent(validBinding))
-        assertFalse(hasExplicitPlayPackage(listOf(constructor, packageString, otherIntentSetPackage)))
-        assertFalse(hasPlayScopedLicenseServiceIntent(validBinding.dropLast(1) + wrongIntentBind))
-        assertFalse(hasPlayScopedLicenseServiceIntent(listOf(licenseAction, decode, decodedBytes, stringConstructor, constructor, bindService, packageString, setPackage)))
-        assertFalse(hasPlayScopedLicenseServiceIntent(listOf(licenseAction, decode, decodedBytes, stringConstructor, constructor, packageString, setPackage)))
-        assertFalse(hasPlayScopedLicenseServiceIntent(listOf(constructor, packageString, setPackage, bindService)))
+    }
+
+
+    @Test
+    fun prepopulatedObbAndDownloaderBypassCannotSkipExistingLicenseChecker() {
+        validateExpansionDownloaderLicenseFlow(
+            bypassSelected = false,
+            embeddedObbSelected = false,
+            hasExpansionDownloader = true,
+            hasLicenseChecker = true,
+        )
+        val nonstandardDownloaderFailure = assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionDownloaderLicenseFlow(
+                bypassSelected = false,
+                embeddedObbSelected = true,
+                hasExpansionDownloader = false,
+                hasLicenseChecker = true,
+            )
+        }
+        assertTrue(nonstandardDownloaderFailure.message!!.contains("existing LicenseChecker flow"))
+        validateExpansionDownloaderLicenseFlow(
+            bypassSelected = true,
+            embeddedObbSelected = true,
+            hasExpansionDownloader = true,
+            hasLicenseChecker = false,
+        )
+        val bypassFailure = assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionDownloaderLicenseFlow(
+                bypassSelected = true,
+                embeddedObbSelected = true,
+                hasExpansionDownloader = true,
+                hasLicenseChecker = true,
+            )
+        }
+        assertTrue(bypassFailure.message!!.contains("license verification cannot be proven"))
+        val embedFailure = assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionDownloaderLicenseFlow(
+                bypassSelected = false,
+                embeddedObbSelected = true,
+                hasExpansionDownloader = true,
+                hasLicenseChecker = true,
+            )
+        }
+        assertTrue(embedFailure.message!!.contains("pre-staging the OBB"))
     }
 
     @Test

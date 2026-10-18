@@ -4,7 +4,9 @@ import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction11x
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction12x
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21c
+import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction22c
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction35c
+import com.android.tools.smali.dexlib2.immutable.reference.ImmutableFieldReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableMethodReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableStringReference
 import org.junit.Test
@@ -99,6 +101,16 @@ class LegacyAppCompatibilityFileUrisTest {
             setter,
         )
         assertEquals(ShareConsumer(4, 0), fileUriShareConsumer(instructions, 1))
+        val reusedRegister = instructions + listOf(
+            BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 0),
+            BuilderInstruction22c(
+                Opcode.IGET_OBJECT,
+                1,
+                2,
+                ImmutableFieldReference("Lexample/Owner;", "context", "Landroid/content/Context;"),
+            ),
+        )
+        assertEquals(ShareConsumer(4, 0), fileUriShareConsumer(reusedRegister, 1))
     }
 
     @Test
@@ -121,6 +133,29 @@ class LegacyAppCompatibilityFileUrisTest {
             null,
             fileUriShareConsumer(
                 listOf(fromFile, moveResult, BuilderInstruction21c(Opcode.CONST_STRING, 3, ImmutableStringReference("overwritten")), setter),
+                1,
+            ),
+        )
+    }
+
+    @Test
+    fun `skips URI if same result is used again after Intent setter`() {
+        val fromFile = BuilderInstruction35c(
+            Opcode.INVOKE_STATIC, 1, 2, 0, 0, 0, 0,
+            ImmutableMethodReference("Landroid/net/Uri;", "fromFile", listOf("Ljava/io/File;"), "Landroid/net/Uri;"),
+        )
+        val setter = BuilderInstruction35c(
+            Opcode.INVOKE_VIRTUAL, 2, 0, 3, 0, 0, 0,
+            ImmutableMethodReference("Landroid/content/Intent;", "setData", listOf("Landroid/net/Uri;"), "Landroid/content/Intent;"),
+        )
+        val laterUse = BuilderInstruction35c(
+            Opcode.INVOKE_STATIC, 1, 3, 0, 0, 0, 0,
+            ImmutableMethodReference("Lexample/Other;", "consume", listOf("Landroid/net/Uri;"), "V"),
+        )
+        assertEquals(
+            null,
+            fileUriShareConsumer(
+                listOf(fromFile, BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 3), setter, laterUse),
                 1,
             ),
         )

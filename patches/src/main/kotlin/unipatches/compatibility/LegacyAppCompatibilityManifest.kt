@@ -8,7 +8,9 @@ import app.morphe.patcher.patch.stringOption
 import app.morphe.patcher.patch.stringsOption
 import helpers.manifest.NS_ANDROID
 import helpers.manifest.applicationOrNull
+import helpers.startup.StartupHooks
 import java.util.logging.Logger
+import java.util.zip.ZipFile
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 
@@ -20,6 +22,8 @@ internal const val SCHEDULE_EXACT_ALARM = "android.permission.SCHEDULE_EXACT_ALA
 internal const val BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT"
 internal const val BLUETOOTH_SCAN = "android.permission.BLUETOOTH_SCAN"
 internal const val READ_PHONE_STATE = "android.permission.READ_PHONE_STATE"
+internal const val MIN_SUPPORTED_TARGET_SDK = 23
+internal const val MAX_SUPPORTED_TARGET_SDK = 40
 internal fun hasPermission(document: Document, name: String): Boolean =
     listOf("uses-permission", "uses-permission-sdk-23").any { tag ->
         val permissions = document.getElementsByTagName(tag)
@@ -212,7 +216,7 @@ internal fun applyLegacyTargetSdk(
     }
 
     val selected = customTarget ?: 24
-    if (selected !in 23..40) {
+    if (selected !in MIN_SUPPORTED_TARGET_SDK..MAX_SUPPORTED_TARGET_SDK) {
         return LegacyTargetSdkUpdateResult(original, selected, original, LegacyTargetSdkOutcome.OUT_OF_RANGE)
     }
 
@@ -483,23 +487,23 @@ internal fun legacyManifestPreflightFindings(
 val legacyAppCompatibilityPatch = resourcePatch(
     name = "Legacy App Compatibility Patch ( Experimental, Enhanced )",
     description = """
-        Improves older app and game compatibility on modern Android with manifest, storage, screen,
-        native runtime, network, shared-library, device-identity, and OpenIAB receiver controls.
-        Spoof Target SDK may help installation or launch, but cannot repair incompatible code.
+        Improves older apps and games on modern Android with opt-in manifest, storage, display,
+        file-sharing, network, native-library, OpenIAB, and OBB fixes. Includes target SDK controls,
+        diagnostics, API-gated package visibility and foreground-service types, selected-domain
+        cleartext, and FileProvider sharing for app-private files.
 
-        Use Control Embedded Auth / Stores Patch for Google Play license or Google Play Services checks;
-        these options stay separate to prevent overlapping injections.
+        Presets add ordinary fixes; Custom booleans start off. Ambiguous receiver calls are skipped.
+        Native checks reject APK library collisions during relocation and DT_TEXTREL for target SDK 23+.
+        OBB pre-staging and downloader bypass are refused when they could skip an existing
+        LicenseChecker. These safeguards may stop patching. Target SDK spoofing cannot repair
+        incompatible code.
 
-        This patch cannot restore shut-down servers, missing CPU architecture support, server licensing,
-        Play Integrity, or unsupported native code. Custom starts with all boolean options disabled;
-        OpenIAB defaults to automatic. Android-era presets add ordinary compatibility fixes.
+        Does not bypass Google licensing or Play Services. Use Control Embedded Auth / Stores Patch
+        for those. It cannot restore stopped servers, unsupported ABIs, server licensing,
+        Play Integrity, or incompatible native code.
 
-        Experimental: Its functionalities are not guaranteed to work in all apps.
-
-        Credits: Nai64Patches from Nai64 for the original legacy compatibility functionality. Credits to
-        LSPosed for the Hidden API bypass approach and AndroidHiddenApiBypass implementation (Apache-2.0).
-        UniPatches adds the merged settings, validation, manifest safeguards, compatibility organization,
-        and the Suppress GPlay Login UI patch option.
+        Credits: Nai64Patches from Nai64 for the original compatibility functionality. LSPosed for
+        the Hidden API bypass approach and AndroidHiddenApiBypass (Apache-2.0).
     """.trimIndent(),
     default = false,
 ) {
@@ -704,13 +708,13 @@ val legacyAppCompatibilityPatch = resourcePatch(
         title = "Legacy App Compatibility > Expansion data and OBB > Embed and stage expansion OBB",
         default = false,
         key = "legacyCompatibilityEmbedExpansionObb",
-        description = "Use when the app needs an OBB at first launch and no downloader can provide it. The file is bundled inside the APK and copied to the expected OBB folder; this can greatly increase APK size and may hit storage or distribution limits.",
+        description = "Use when the app needs an OBB at first launch and no downloader can provide it. The file is bundled inside the APK and copied to the expected OBB folder; this can greatly increase APK size. Pre-staging can skip license checks; the patch refuses this option whenever a LicenseChecker class exists, even if its downloader flow cannot be identified.",
     )
     val bypassExpansionDownloaderRaw by booleanOption(
         title = "Legacy App Compatibility > Expansion data and OBB > Bypass known Unity expansion downloader",
         default = false,
         key = "legacyCompatibilityBypassExpansionDownloader",
-        description = "Use only for the recognized Unity expansion downloader when it blocks startup despite bundling the OBB. It redirects launcher handling to Unity's known launcher; it is not a general downloader repair and requires Embed and stage expansion OBB.",
+        description = "Use only for the standard Google ExpansionDownloader when it blocks startup despite bundled OBB data. The target activity is detected from DownloaderActivity's Intent(Class) launch and must inherit a Unity engine activity base class. It is not a general downloader repair, requires Embed and stage expansion OBB, fails if a single safe target cannot be proven, and is refused when a LicenseChecker exists.",
     )
     val allScreensRaw by booleanOption(
         title = "Legacy App Compatibility > Storage and display > Support All Screens",
@@ -786,6 +790,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
     val removeRelocatedNativeLibrariesFromObb by option { removeRelocatedNativeLibrariesFromObbRaw == true }
     val embedExpansionObb by option { embedExpansionObbRaw == true }
     val bypassExpansionDownloader by option { bypassExpansionDownloaderRaw == true }
+    val expansionLauncherTarget = LegacyExpansionLauncherTarget()
     val allScreens by option { allScreensRaw == true }
     val extractNativeLibs by option { extractNativeLibsRaw == true }
     val disableHeapTagging by option { disableHeapTaggingRaw == true }
@@ -795,6 +800,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
 
     dependsOn(legacyImeiPatch { Pair(!diagnosticsOnly && spoofImei, imei.orEmpty().trim()) })
     dependsOn(openIabReceiverFlagsPatch { if (diagnosticsOnly) OPEN_IAB_DISABLED else openIabReceiverRegistrationMode })
+    dependsOn(legacyExpansionLauncherTargetPatch(expansionLauncherTarget) { bypassExpansionDownloader })
     dependsOn(legacyExpansionFilesPatch {
         LegacyExpansionOptions(
             obbPath = expansionObbPath.orEmpty().trim(),
@@ -817,7 +823,19 @@ val legacyAppCompatibilityPatch = resourcePatch(
     })
     dependsOn(legacyReceiverFlagsPatch { !diagnosticsOnly && receiverFixAppWide })
     dependsOn(legacyDownloaderPendingIntentPatch { !diagnosticsOnly })
-    dependsOn(legacyLicenseServiceIntentPatch { !diagnosticsOnly })
+    dependsOn(
+        legacyLicenseServiceIntentPatch(
+            enabledProvider = {
+                !diagnosticsOnly && !(bypassExpansionDownloader == true && detectedEngines.unity &&
+                    embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty())
+            },
+            bypassExpansionDownloaderProvider = {
+                bypassExpansionDownloader == true && detectedEngines.unity &&
+                    embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty()
+            },
+            embeddedExpansionObbProvider = { embedExpansionObb == true },
+        ),
+    )
     dependsOn(legacyCompatibilityBytecodePreflightPatch(enabledProvider = { diagnosticsOnly }))
 
     execute {
@@ -885,6 +903,9 @@ val legacyAppCompatibilityPatch = resourcePatch(
         if (trustCertificates == true && acknowledgeTrustCertificates != true) {
             logger.warning("Legacy compatibility: Trust All Certificates was requested without the required high-risk acknowledgement; trust-all TLS remains disabled.")
         }
+        val selectedPackageVisibility = if (playStorePackageVisibility == true) {
+            normalizePackageVisibilityAllowlist(packageVisibilityAllowlist)
+        } else emptyList()
         fun reportManifestPreflight(manifest: Document) {
             legacyManifestPreflightFindings(
                 document = manifest,
@@ -896,10 +917,16 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 embedExpansionObb = embedExpansionObb == true,
                 expansionObbPath = obbPathForLog,
                 deviceApi = currentAndroidApiLevel(),
-                packageVisibilityAllowlist = packageVisibilityAllowlist,
+                packageVisibilityAllowlist = selectedPackageVisibility,
             ).forEach { logger.info(formatLegacyCompatibilityPreflightFinding(it)) }
         }
 
+        validateEmbeddedExpansionObbSelection(embedExpansionObb == true, obbPathForLog)
+        validateExpansionObbRelocationOptions(
+            relocate = relocateExpansionNativeLibraries == true,
+            embed = embedExpansionObb == true,
+            removeFromObb = removeRelocatedNativeLibrariesFromObb == true,
+        )
         validateCleartextModes(
             globalEnabled = allowCleartext == true,
             domainScopedEnabled = allowSelectedCleartextDomains == true,
@@ -909,11 +936,13 @@ val legacyAppCompatibilityPatch = resourcePatch(
         } else {
             emptyList()
         }
+        validateCleartextDomainSelection(allowSelectedCleartextDomains == true, selectedCleartextDomains)
         validateExpansionDownloaderBypass(
             selected = bypassExpansionDownloader == true,
             unityDetected = detectedEngines.unity,
             obbEmbeddingSelected = embedExpansionObb == true,
             obbPath = obbPathForLog,
+            launcherActivity = expansionLauncherTarget.activityName,
         )
         val selectedForegroundMappings = if (applyForegroundServiceTypes == true) {
             get("AndroidManifest.xml", false).inputStream().use { input ->
@@ -930,6 +959,105 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 }
             }
         } else emptyList()
+        validateForegroundServiceMappingSelection(applyForegroundServiceTypes == true, selectedForegroundMappings)
+
+        val nativeManifest = readSecureXml(get("AndroidManifest.xml", false))
+        val visibilityTarget = if (spoofTargetSdk == true) {
+            plannedNativeTargetSdk(true, targetSdk)
+        } else {
+            originalTargetSdkValue(nativeManifest)?.toIntOrNull()
+        }
+        val frameworkRequirements = buildList {
+            if (playStorePackageVisibility == true && selectedPackageVisibility.isNotEmpty() &&
+                visibilityTarget != null && visibilityTarget >= 30
+            ) add(ManifestFrameworkRequirement("package visibility queries", 30))
+            if (allowCleartext == true) add(ManifestFrameworkRequirement("global cleartext", 23))
+            if (allowSelectedCleartextDomains == true) add(ManifestFrameworkRequirement("domain-scoped cleartext", 24))
+            if (legacyStorage == true) add(ManifestFrameworkRequirement("requestLegacyExternalStorage", 29))
+            if (disableHeapTagging == true) add(ManifestFrameworkRequirement("allowNativeHeapPointerTagging", 30))
+            if (extractNativeLibs == true) add(ManifestFrameworkRequirement("extractNativeLibs", 23))
+            minimumForegroundServiceFrameworkApi(selectedForegroundMappings)?.let {
+                add(ManifestFrameworkRequirement("foregroundServiceType", it))
+            }
+        }
+        inputManifestFrameworkFailure(nativeManifest, frameworkRequirements)?.let { failure ->
+            if (diagnosticsOnly == true) {
+                logger.warning("$failure No newer manifest attributes were applied in diagnostics-only mode.")
+            } else {
+                throw IllegalArgumentException(failure)
+            }
+        }
+        val rawSourceTarget = originalTargetSdkValue(nativeManifest)
+        val sourceNativeTarget = when {
+            rawSourceTarget == null -> 1
+            else -> rawSourceTarget.toIntOrNull()?.takeIf { it >= 1 }
+        }
+        val plannedNativeTarget = plannedNativeTargetSdk(spoofTargetSdk == true, targetSdk)
+        val effectiveNativeTarget = nativeTargetSdkForInspection(
+            sourceNativeTarget,
+            targetSdk,
+            spoofTargetSdk == true,
+            diagnosticsOnly == true,
+        )
+        val apkNativePaths = listApkEntries("lib/").filter { it.endsWith(".so") }.distinct()
+        require(apkNativePaths.size <= 512) {
+            "Legacy compatibility: found more than 512 APK native libraries; refusing unbounded native metadata scan."
+        }
+        require(apkNativePaths.all(::isSafeApkNativeLibraryPath)) {
+            "Legacy compatibility: APK contains a native-library path outside lib/<abi>/<name>.so; refusing ambiguous native metadata or relocation."
+        }
+        val apkNativePathSet = apkNativePaths.toSet()
+        val nativeInspections = apkNativePaths.map { path ->
+            inspectNativeLibrary(path, get(path, false), destination = path, collision = false)
+        }.toMutableList()
+        val inspectObbLibraries = obbPathForLog.isNotBlank() || embedExpansionObb == true || relocateExpansionNativeLibraries == true || removeRelocatedNativeLibrariesFromObb == true
+        if (inspectObbLibraries) {
+            val packageName = StartupHooks.resolvedPackageName
+                ?: error("Legacy compatibility: cannot inspect OBB native libraries because APK package name could not be resolved.")
+            val obb = validateExpansionObbInput(obbPathForLog, packageName, StartupHooks.resolvedVersionCode)
+            ZipFile(obb).use { zip ->
+                val nativeCandidates = zip.entries().asSequence()
+                    .filter { it.name.startsWith("assets/libs/") && it.name.endsWith(".so") }
+                    .toList()
+                require(nativeCandidates.size <= 512) {
+                    "Legacy compatibility: found more than 512 OBB native libraries; refusing unbounded native metadata scan."
+                }
+                val unsupportedNativePaths = nativeCandidates.filter { expansionNativeDestination(it.name) == null }
+                require(relocateExpansionNativeLibraries != true || unsupportedNativePaths.isEmpty()) {
+                    "Legacy compatibility: native-library relocation refused because an OBB library path is outside assets/libs/<abi>/<name>.so; resolve the OBB layout manually."
+                }
+                nativeInspections += unsupportedNativePaths.map { entry ->
+                    NativeLibraryInspection(entry.name, null, "unsupported OBB native-library path", entry.size.takeIf { it >= 0 })
+                }
+                val nativeEntries = nativeCandidates.filter { expansionNativeDestination(it.name) != null }
+                nativeInspections += nativeEntries.map { entry ->
+                    val destination = requireNotNull(expansionNativeDestination(entry.name))
+                    inspectNativeLibrary(zip, entry, destination, destination in apkNativePathSet)
+                }
+            }
+        }
+        nativeInspections.forEach { inspection ->
+            val message = formatNativeLibraryInspection(inspection, effectiveNativeTarget)
+            if (inspection.metadata == null) logger.warning(message) else logger.info(message)
+        }
+        fun nativeIssueSummary(issues: List<String>): String = issues.take(12).joinToString("; ") +
+            if (issues.size > 12) "; and ${issues.size - 12} additional finding(s)" else ""
+        val nativeIssues = nativeLibraryCompatibilityIssues(nativeInspections, effectiveNativeTarget)
+        if (nativeIssues.isNotEmpty()) {
+            val message = "Legacy compatibility: native libraries are not proven safe for effective targetSdk ${effectiveNativeTarget ?: "unknown"}: ${nativeIssueSummary(nativeIssues)}"
+            if (diagnosticsOnly == true) logger.warning("$message. Diagnostics only; no APK changes applied.") else error(message)
+        }
+        val plannedNativeIssues = if (diagnosticsOnly == true && plannedNativeTarget != null && plannedNativeTarget != effectiveNativeTarget) {
+            nativeLibraryCompatibilityIssues(nativeInspections, plannedNativeTarget)
+        } else emptyList()
+        if (plannedNativeIssues.isNotEmpty()) {
+            logger.warning(
+                "Legacy compatibility: native libraries would be unsafe at planned targetSdk $plannedNativeTarget (not applied in diagnostics-only mode): ${nativeIssueSummary(plannedNativeIssues)}",
+            )
+        }
+        if (nativeIssues.isEmpty() && plannedNativeIssues.isEmpty()) {
+            logger.info("Legacy compatibility: no DT_TEXTREL or malformed ELF incompatibility detected for effective targetSdk ${effectiveNativeTarget ?: "unknown"}; JNI entrypoints and runtime loader outcome remain unknown.")
+        }
         if (diagnosticsOnly == true) {
             get("AndroidManifest.xml", false).inputStream().use { input ->
                 document(input).use { manifest -> reportManifestPreflight(manifest) }
@@ -1066,7 +1194,9 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 }
             }
             if (bypassExpansionDownloader == true) {
-                changed += moveExpansionDownloaderLauncher(manifest, logger)
+                val launcherActivity = expansionLauncherTarget.activityName
+                    ?: error("Legacy compatibility: downloader bypass activity detection failed: ${expansionLauncherTarget.error}")
+                changed += moveExpansionDownloaderLauncher(manifest, logger, launcherActivity)
             }
             if (allScreens == true) {
                 val (removed, updated) = supportAllScreens(manifest)
@@ -1082,7 +1212,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 if (update.finalTarget == null || update.finalTarget < 30) {
                     logger.warning("Legacy compatibility: package visibility queries require effective targetSdk 30+; no queries added (target=${update.finalTarget ?: "unknown"}).")
                 } else {
-                    packageVisibilityApplied = normalizePackageVisibilityAllowlist(packageVisibilityAllowlist)
+                    packageVisibilityApplied = selectedPackageVisibility
                     if (packageVisibilityApplied.isEmpty()) {
                         logger.warning("Legacy compatibility: Package Visibility Allowlist is empty; no package queries added.")
                     } else {
@@ -1117,11 +1247,13 @@ val legacyAppCompatibilityPatch = resourcePatch(
             }
             logger.info("Legacy compatibility: package visibility queries verified for targetSdk ${packageVisibilityTarget}: ${packageVisibilityApplied.joinToString()}.")
         }
-        if (bypassExpansionDownloader == true && detectedEngines.unity) {
+        if (bypassExpansionDownloader == true) {
+            val launcherActivity = expansionLauncherTarget.activityName
+                ?: error("Legacy compatibility: downloader bypass activity detection failed: ${expansionLauncherTarget.error}")
             get("AndroidManifest.xml", false).inputStream().use { input ->
-                document(input).use(::verifyExpansionDownloaderLauncher)
+                document(input).use { verifyExpansionDownloaderLauncher(it, launcherActivity) }
             }
-            logger.info("Legacy compatibility: downloader bypass manifest verified after transformation; DownloaderActivity is not launcher and UnityLauncherActivity is launcher.")
+            logger.info("Legacy compatibility: downloader bypass manifest verified after transformation; DownloaderActivity is not launcher and $launcherActivity is launcher.")
         }
         if (repairFileUriSharing == true) {
             if (fileUriSharingResult.patchedCallSites == 0 && fileUriSharingResult.alreadyPatchedCallSites == 0) {
