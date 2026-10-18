@@ -6,9 +6,9 @@ import java.util.logging.Logger
 
 internal data class LegacyDetectedEngines(var unity: Boolean = false, var openIab: Boolean = false)
 
-/** Exact engine descriptors, not app names, assets, or fuzzy package matches. */
+/** Exact engine descriptors, not app names, launcher classes, assets, or fuzzy package matches. */
 internal fun detectLegacyEngines(types: Set<String>): LegacyDetectedEngines = LegacyDetectedEngines(
-    unity = "Lcom/unity3d/player/UnityPlayer;" in types && "Lcom/unity3d/player/UnityPlayerActivity;" in types,
+    unity = "Lcom/unity3d/player/UnityPlayer;" in types,
     openIab = "Lorg/onepf/oms/OpenIabHelper;" in types,
 )
 

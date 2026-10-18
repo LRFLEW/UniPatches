@@ -80,6 +80,20 @@ class LegacyAppCompatibilityReceiversTest {
     }
 
     @Test
+    fun unclassifiedThirdPartyActionIsSkippedRatherThanExported() {
+        val action = "com.example.vendor.internal.EVENT"
+        assertNull(receiverFlagsForActions(setOf(action), "com.glu.gunbros2"))
+        assertEquals(
+            "Legacy compatibility: skipped receiver fix in Lcom/glu/gunbros2/Receiver;->onReceive; IntentFilter contains unclassified actions: [$action]",
+            receiverSkipDiagnostic(
+                "Lcom/glu/gunbros2/Receiver;",
+                "onReceive",
+                "IntentFilter contains unclassified actions: [$action]",
+            ),
+        )
+    }
+
+    @Test
     fun mixedAppAndExternalActionsPreferExportedFlag() {
         assertEquals(
             RECEIVER_EXPORTED,

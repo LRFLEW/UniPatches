@@ -1,3 +1,25 @@
+## [1.33.0-dev.2](https://github.com/Zanuaimi/UniPatches/compare/v1.33.0-dev.1...v1.33.0-dev.2) (2026-10-18)
+
+### 🔧 Improvements
+
+* **compatibility:** Replace hardocded solutions ( was for gun bros 2 ) with generic solutions, and fix licensing crash, and update README ([f6afe01](https://github.com/Zanuaimi/UniPatches/commit/f6afe0118088d2558a65f8ed065f62e3ce8355fc))
+
+## [1.33.0-dev.1](https://github.com/Zanuaimi/UniPatches/compare/v1.32.0...v1.33.0-dev.1) (2026-10-17)
+
+### ✨ New Features
+
+* **compatibility:** Add new patch options ([7c5a45d](https://github.com/Zanuaimi/UniPatches/commit/7c5a45ddb70fa7bc7bdccb19543a6b819a6195d4))
+
+### 🔧 Improvements
+
+* **compatibility:** Improve download manager bypass, and fix licensing intent ([249bd17](https://github.com/Zanuaimi/UniPatches/commit/249bd17c553785669c43fdb04171f9928938f029))
+
+## [1.32.1-dev.1](https://github.com/Zanuaimi/UniPatches/compare/v1.32.0...v1.32.1-dev.1) (2026-10-16)
+
+### 🔧 Improvements
+
+* **compatibility:** Improve download manager bypass, and fix licensing intent ([249bd17](https://github.com/Zanuaimi/UniPatches/commit/249bd17c553785669c43fdb04171f9928938f029))
+
 ## [1.32.0](https://github.com/Zanuaimi/UniPatches/compare/v1.31.2...v1.32.0) (2026-10-15)
 
 ### 🐛 Bug Fixes
