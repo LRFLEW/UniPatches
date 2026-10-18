@@ -1,3 +1,9 @@
+## [1.33.2](https://github.com/Zanuaimi/UniPatches/compare/v1.33.1...v1.33.2) (2026-10-18)
+
+### 🐛 Bug Fixes
+
+* **compatibility:** Fix Embed Obb / Bypass Downloader patch error ([6fbcc5e](https://github.com/Zanuaimi/UniPatches/commit/6fbcc5e50d076fc3810e742d5ac0bc40a26dd228))
+
 ## [1.33.1](https://github.com/Zanuaimi/UniPatches/compare/v1.33.0...v1.33.1) (2026-10-18)
 
 ### 🐛 Bug Fixes
