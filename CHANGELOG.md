@@ -1,3 +1,9 @@
+## [1.33.0-dev.2](https://github.com/Zanuaimi/UniPatches/compare/v1.33.0-dev.1...v1.33.0-dev.2) (2026-10-18)
+
+### 🔧 Improvements
+
+* **compatibility:** Replace hardocded solutions ( was for gun bros 2 ) with generic solutions, and fix licensing crash, and update README ([f6afe01](https://github.com/Zanuaimi/UniPatches/commit/f6afe0118088d2558a65f8ed065f62e3ce8355fc))
+
 ## [1.33.0-dev.1](https://github.com/Zanuaimi/UniPatches/compare/v1.32.0...v1.33.0-dev.1) (2026-10-17)
 
 ### ✨ New Features
