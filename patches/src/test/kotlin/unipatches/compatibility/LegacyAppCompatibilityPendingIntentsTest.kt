@@ -126,6 +126,7 @@ class LegacyAppCompatibilityPendingIntentsTest {
             embeddedObbSelected = false,
             hasExpansionDownloader = true,
             hasLicenseChecker = true,
+            verifiedGate = false,
         )
         val nonstandardDownloaderFailure = assertThrows(IllegalArgumentException::class.java) {
             validateExpansionDownloaderLicenseFlow(
@@ -133,14 +134,26 @@ class LegacyAppCompatibilityPendingIntentsTest {
                 embeddedObbSelected = true,
                 hasExpansionDownloader = false,
                 hasLicenseChecker = true,
+                verifiedGate = false,
             )
         }
-        assertTrue(nonstandardDownloaderFailure.message!!.contains("existing LicenseChecker flow"))
+        assertTrue(nonstandardDownloaderFailure.message!!.contains("supported downloader"))
+        val unsupportedGateFailure = assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionDownloaderLicenseFlow(
+                bypassSelected = false,
+                embeddedObbSelected = true,
+                hasExpansionDownloader = false,
+                hasLicenseChecker = true,
+                verifiedGate = true,
+            )
+        }
+        assertTrue(unsupportedGateFailure.message!!.contains("verified ExpansionDownloader LVL gate"))
         validateExpansionDownloaderLicenseFlow(
             bypassSelected = true,
             embeddedObbSelected = true,
             hasExpansionDownloader = true,
             hasLicenseChecker = false,
+            verifiedGate = false,
         )
         val bypassFailure = assertThrows(IllegalArgumentException::class.java) {
             validateExpansionDownloaderLicenseFlow(
@@ -148,18 +161,34 @@ class LegacyAppCompatibilityPendingIntentsTest {
                 embeddedObbSelected = true,
                 hasExpansionDownloader = true,
                 hasLicenseChecker = true,
+                verifiedGate = false,
             )
         }
-        assertTrue(bypassFailure.message!!.contains("license verification cannot be proven"))
+        assertTrue(bypassFailure.message!!.contains("verified ExpansionDownloader LVL gate"))
+        validateExpansionDownloaderLicenseFlow(
+            bypassSelected = true,
+            embeddedObbSelected = true,
+            hasExpansionDownloader = true,
+            hasLicenseChecker = true,
+            verifiedGate = true,
+        )
+        validateExpansionDownloaderLicenseFlow(
+            bypassSelected = false,
+            embeddedObbSelected = true,
+            hasExpansionDownloader = true,
+            hasLicenseChecker = true,
+            verifiedGate = true,
+        )
         val embedFailure = assertThrows(IllegalArgumentException::class.java) {
             validateExpansionDownloaderLicenseFlow(
                 bypassSelected = false,
                 embeddedObbSelected = true,
                 hasExpansionDownloader = true,
                 hasLicenseChecker = true,
+                verifiedGate = false,
             )
         }
-        assertTrue(embedFailure.message!!.contains("pre-staging the OBB"))
+        assertTrue(embedFailure.message!!.contains("verified ExpansionDownloader LVL gate"))
     }
 
     @Test

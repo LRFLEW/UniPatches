@@ -4,7 +4,11 @@ import app.morphe.patcher.Patcher
 import app.morphe.patcher.PatcherConfig
 import app.morphe.patcher.apk.ApkUtils.applyTo
 import com.android.tools.smali.dexlib2.DexFileFactory
+import com.android.tools.smali.dexlib2.dexbacked.instruction.DexBackedInstruction
 import com.android.tools.smali.dexlib2.Opcodes
+import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.OffsetInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import app.morphe.patcher.patch.resourcePatch
@@ -224,7 +228,7 @@ class LegacyAppCompatibilityArtifactTest {
         }
     }
 
-    @Test fun gunBrosEmbeddingObbFailsWhenItWouldSkipLicenseVerification() {
+    @Test fun gunBrosStagedObbRunsExistingLicenseGateBeforeUnity() {
         val input = System.getenv("LEGACY_TEST_APK")
         val obbPath = System.getenv("LEGACY_TEST_OBB")
         assumeNotNull(input, obbPath)
@@ -234,35 +238,129 @@ class LegacyAppCompatibilityArtifactTest {
         val originalObbSha256 = expansionSha256(obb)
         val patch = legacyAppCompatibilityPatch
         patch.options.values.forEach { it.reset() }
-        try {
-            patch.options["legacyCompatibilityEmbedExpansionObb"] = true
-            patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
-            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/lvl-obb-embed"), patch)
-            assertNotNull("Pre-staging OBB must not make the recognized downloader skip LVL", failure)
-            assertTrue(failure!!.contains("pre-staging the OBB"))
-            assertEquals(originalObbSha256, expansionSha256(obb))
-        } finally {
-            patch.options.values.forEach { it.reset() }
+        val messages = mutableListOf<String>()
+        val handler = object : Handler() {
+            override fun publish(record: LogRecord) { messages += record.message }
+            override fun flush() {}
+            override fun close() {}
         }
-    }
-
-    @Test fun gunBrosDownloaderBypassFailsWhenItWouldSkipLicenseVerification() {
-        val input = System.getenv("LEGACY_TEST_APK")
-        val obbPath = System.getenv("LEGACY_TEST_OBB")
-        assumeNotNull(input, obbPath)
-        val apk = File(input!!)
-        val obb = File(obbPath!!)
-        require(apk.isFile && obb.isFile) { "Set LEGACY_TEST_APK and LEGACY_TEST_OBB to the original Gun Bros 2 artifacts" }
-        val patch = legacyAppCompatibilityPatch
-        patch.options.values.forEach { it.reset() }
+        val logger = Logger.getLogger("")
+        logger.addHandler(handler)
+        val output = File("build/legacy-artifacts").apply { mkdirs() }
+        val artifact = File(output, "gun-bros2-obbed-lvl-gate.apk")
         try {
             patch.options["legacyCompatibilityBypassExpansionDownloader"] = true
             patch.options["legacyCompatibilityEmbedExpansionObb"] = true
             patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
-            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/lvl-bypass"), patch)
-            assertNotNull("Gun Bros downloader bypass must not make LVL unreachable", failure)
-            assertTrue(failure!!.contains("license verification cannot be proven"))
+            Patcher(PatcherConfig(apk, File(output, "gun-bros2-obbed-lvl-gate-work"))).use { patcher ->
+                patcher += setOf(patch)
+                runBlocking { patcher().collect { result -> result.exception?.let { throw it } } }
+                apk.copyTo(artifact, overwrite = true)
+                patcher.get().applyTo(artifact)
+            }
+
+            val dexContainer = DexFileFactory.loadDexContainer(artifact, Opcodes.getDefault())
+            val classes = dexContainer.dexEntryNames.mapNotNull { dexContainer.getEntry(it)?.dexFile }.flatMap { it.classes }
+            val activity = classes.single { it.type == GOOGLE_EXPANSION_DOWNLOADER_TYPE }
+            val finish = activity.methods.single { it.name == "finishOnCreate" && it.parameterTypes.isEmpty() }
+                .implementation!!.instructions.toList()
+            val startService = finish.indexOfFirst { instruction ->
+                val method = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                method?.definingClass == "Lcom/google/android/vending/expansion/downloader/DownloaderClientMarshaller;" && method.name == "startDownloadServiceIfRequired"
+            }
+            val validateObb = finish.indexOfFirst { instruction ->
+                val method = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                method?.name == "validateXAPKZipFiles"
+            }
+            assertTrue("DownloaderService path is missing", startService >= 0)
+            val serviceResult = finish.getOrNull(startService + 1)
+            val serviceResultRegister = (serviceResult as? OneRegisterInstruction)?.registerA
+            val serviceResultBranch = finish.getOrNull(startService + 2)
+            assertTrue("Only a zero result (cached license or allow) may continue to OBB validation",
+                serviceResult?.opcode == com.android.tools.smali.dexlib2.Opcode.MOVE_RESULT &&
+                    serviceResultBranch?.opcode == com.android.tools.smali.dexlib2.Opcode.IF_EQZ &&
+                    serviceResultRegister == (serviceResultBranch as? OneRegisterInstruction)?.registerA)
+            val validationTarget = branchTargetIndex(finish, startService + 2)
+            assertTrue("Zero service result must target the existing OBB validation path", validationTarget >= 0 && validationTarget <= validateObb)
+            val nonzeroPath = finish.drop(startService + 3).takeWhile { instruction ->
+                instruction.opcode !in setOf(
+                    com.android.tools.smali.dexlib2.Opcode.GOTO,
+                    com.android.tools.smali.dexlib2.Opcode.GOTO_16,
+                    com.android.tools.smali.dexlib2.Opcode.GOTO_32,
+                    com.android.tools.smali.dexlib2.Opcode.RETURN_VOID,
+                )
+            }
+            assertFalse("Nonzero service result must not fall through to OBB validation", nonzeroPath.any { instruction ->
+                ((instruction as? ReferenceInstruction)?.reference as? MethodReference)?.name == "validateXAPKZipFiles"
+            })
+            assertFalse("Staging must not trigger DownloaderActivity.removeObsolete()", finish.any { instruction ->
+                val method = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                method?.name == "removeObsolete"
+            })
+            assertTrue("Service-start exception must return before OBB validation", finish.indices.any { index ->
+                val method = (finish[index] as? ReferenceInstruction)?.reference as? MethodReference
+                method?.name == "printStackTrace" && finish.getOrNull(index + 1)?.opcode == com.android.tools.smali.dexlib2.Opcode.RETURN_VOID
+            })
+            val initializeUi = activity.methods.single { it.name == "initializeDownloadUI" && it.parameterTypes.isEmpty() }
+                .implementation!!.instructions.toList()
+            assertTrue("Gate must create downloader client stub to receive LVL callback", initializeUi.any { instruction ->
+                val method = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                method?.definingClass == "Lcom/google/android/vending/expansion/downloader/DownloaderClientMarshaller;" && method.name == "CreateStub"
+            })
+            val statusIndex = initializeUi.indexOfFirst { instruction ->
+                val method = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                method?.name == "setState" && method.parameterTypes == listOf("I")
+            }
+            val hideIndex = initializeUi.indexOfFirst { instruction ->
+                val method = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                method?.name == "setVisibility" && method.parameterTypes == listOf("I")
+            }
+            assertTrue("Staged OBB gate shows status and hides download controls before LVL response", statusIndex > 0 && hideIndex > statusIndex)
+            assertTrue(initializeUi.take(statusIndex).any { instruction ->
+                instruction.opcode == com.android.tools.smali.dexlib2.Opcode.SGET_BOOLEAN &&
+                    (instruction as? ReferenceInstruction)?.reference?.let { it as? com.android.tools.smali.dexlib2.iface.reference.FieldReference }?.name == "resourcesDownloaded"
+            })
+
+            val callback = classes.single { "Lcom/google/android/vending/licensing/LicenseCheckerCallback;" in it.interfaces }
+            val denied = callback.methods.single { it.name == "dontAllow" && it.parameterTypes == listOf("I") }
+            val appError = callback.methods.single { it.name == "applicationError" && it.parameterTypes == listOf("I") }
+            val allowed = callback.methods.single { it.name == "allow" && it.parameterTypes == listOf("I") }
+            assertTrue("Not-licensed/retry paths must force existing error branches", hasForcedLicenseFailureBranches(denied.implementation!!.instructions.toList(), setOf(13, 14)))
+            assertTrue("Application errors must force existing error branch", hasForcedLicenseFailureBranches(appError.implementation!!.instructions.toList(), setOf(14)))
+            assertTrue("License allow path must retain original expansion handling", allowed.implementation!!.instructions.any { instruction ->
+                ((instruction as? ReferenceInstruction)?.reference as? MethodReference)?.name == "originalAllow"
+            })
+
+            val checker = classes.single { it.type == "Lcom/google/android/vending/licensing/LicenseChecker;" }
+            val checkAccess = checker.methods.single { it.name == "checkAccess" }
+            assertTrue(hasPlayScopedLicenseServiceIntent(checkAccess.implementation!!.instructions.toList()))
+            val downloaderLicenseCalls = classes
+                .filter { it.type.startsWith("Lcom/google/android/vending/expansion/downloader/impl/DownloaderService$") }
+                .flatMap { it.methods }
+                .flatMap { it.implementation?.instructions?.toList().orEmpty() }
+                .count { instruction ->
+                    val method = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                    method?.definingClass == "Lcom/google/android/vending/licensing/LicenseChecker;" &&
+                        method.name == "checkAccess" &&
+                        method.parameterTypes == listOf("Lcom/google/android/vending/licensing/LicenseCheckerCallback;")
+                }
+            assertEquals("Existing DownloaderService LVL policy path must still invoke LicenseChecker", 1, downloaderLicenseCalls)
+            val manifestOutput = ProcessBuilder(findApkAnalyzer()!!.absolutePath, "manifest", "print", artifact.absolutePath)
+                .redirectErrorStream(true).start()
+            val compiledManifest = manifestOutput.inputStream.use { it.readBytes() }
+            assertEquals(String(compiledManifest, Charsets.UTF_8), 0, manifestOutput.waitFor())
+            val manifest = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+                .newDocumentBuilder().parse(ByteArrayInputStream(compiledManifest))
+            assertTrue(hasLauncher(manifest, GOOGLE_EXPANSION_DOWNLOADER_ACTIVITY))
+            assertFalse(hasLauncher(manifest, "com.glu.plugins.AUnityInstaller.UnityLauncherActivity"))
+            ZipFile(artifact).use { patched ->
+                assertNotNull("Embedded OBB must remain available for post-license validation", patched.getEntry(expansionAssetPath("main.123.com.glu.gunbros2.obb")))
+            }
+            assertTrue(messages.any { it.contains("verified ExpansionDownloader LVL gate") })
+            assertTrue(messages.any { it.contains("retained DownloaderActivity launcher") })
+            assertEquals(originalObbSha256, expansionSha256(obb))
         } finally {
+            logger.removeHandler(handler)
             patch.options.values.forEach { it.reset() }
         }
     }
@@ -479,6 +577,53 @@ class LegacyAppCompatibilityArtifactTest {
             }
         }
         return total to hash
+    }
+
+    private fun branchTargetIndex(
+        instructions: List<com.android.tools.smali.dexlib2.iface.instruction.Instruction>,
+        branchIndex: Int,
+    ): Int {
+        val branch = instructions.getOrNull(branchIndex) as? OffsetInstruction ?: return -1
+        val backed = instructions[branchIndex] as? DexBackedInstruction ?: return -1
+        val targetAddress = backed.instructionStart + branch.codeOffset * 2
+        return instructions.indexOfFirst { (it as? DexBackedInstruction)?.instructionStart == targetAddress }
+    }
+
+    private fun hasForcedLicenseFailureBranches(instructions: List<com.android.tools.smali.dexlib2.iface.instruction.Instruction>, expectedStates: Set<Int>): Boolean {
+        val branchTargets = instructions.indices.mapNotNull { index ->
+            val constant = instructions[index]
+            val branch = instructions.getOrNull(index + 1)
+            if (constant.opcode != com.android.tools.smali.dexlib2.Opcode.CONST_4 ||
+                (constant as? NarrowLiteralInstruction)?.narrowLiteral != 1 ||
+                branch?.opcode != com.android.tools.smali.dexlib2.Opcode.IF_NEZ ||
+                (constant as? OneRegisterInstruction)?.registerA != (branch as? OneRegisterInstruction)?.registerA
+            ) return@mapNotNull null
+            branchTargetIndex(instructions, index + 1).takeIf { it >= 0 }
+        }
+        val actualStates = branchTargets.mapNotNull { target ->
+            val failurePath = instructions.drop(target).takeWhile { instruction ->
+                instruction.opcode !in setOf(
+                    com.android.tools.smali.dexlib2.Opcode.GOTO,
+                    com.android.tools.smali.dexlib2.Opcode.GOTO_16,
+                    com.android.tools.smali.dexlib2.Opcode.GOTO_32,
+                    com.android.tools.smali.dexlib2.Opcode.RETURN_VOID,
+                    com.android.tools.smali.dexlib2.Opcode.THROW,
+                )
+            }
+            val notifyIndex = failurePath.indexOfFirst { instruction ->
+                val method = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                method?.name == "onDownloadStateChanged" && method.parameterTypes == listOf("I")
+            }
+            if (notifyIndex < 0) return@mapNotNull null
+            failurePath.take(notifyIndex).mapNotNull { instruction ->
+                val literal = instruction as? NarrowLiteralInstruction ?: return@mapNotNull null
+                literal.narrowLiteral.takeIf {
+                    instruction.opcode == com.android.tools.smali.dexlib2.Opcode.CONST_4 ||
+                        instruction.opcode == com.android.tools.smali.dexlib2.Opcode.CONST_16
+                }
+            }.lastOrNull()
+        }.toSet()
+        return branchTargets.size == expectedStates.size && actualStates == expectedStates
     }
 
     private fun findApkAnalyzer(): File? {

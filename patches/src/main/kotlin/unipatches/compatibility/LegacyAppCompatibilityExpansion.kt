@@ -459,6 +459,7 @@ internal fun validateExpansionDownloaderBypass(
     obbEmbeddingSelected: Boolean,
     obbPath: String,
     launcherActivity: String?,
+    verifiedLicenseGate: Boolean = false,
 ) {
     if (!selected) return
     require(unityDetected) {
@@ -467,8 +468,8 @@ internal fun validateExpansionDownloaderBypass(
     require(obbEmbeddingSelected && obbPath.isNotBlank()) {
         "Legacy compatibility: expansion downloader bypass requires OBB embedding and a valid selected OBB file."
     }
-    require(!launcherActivity.isNullOrBlank()) {
-        "Legacy compatibility: downloader bypass could not identify a unique Unity launch activity from the downloader DEX."
+    require(verifiedLicenseGate || !launcherActivity.isNullOrBlank()) {
+        "Legacy compatibility: downloader bypass could not identify a unique Unity launch activity from the downloader DEX or verify a license gate."
     }
 }
 
@@ -492,6 +493,24 @@ internal fun verifyExpansionDownloaderLauncher(document: Document, launcherActiv
         ?: error("Legacy compatibility: downloader bypass readback failed; detected Unity activity '$targetName' is missing.")
     check(!downloader.isLauncherComponent() && unity.isLauncherComponent()) {
         "Legacy compatibility: downloader bypass readback failed; expected DownloaderActivity without MAIN/LAUNCHER and '$targetName' with MAIN/LAUNCHER."
+    }
+}
+
+internal fun verifyExpansionDownloaderLicenseLauncher(document: Document, launcherActivityName: String? = null) {
+    val application = document.documentElement?.getElementsByTagName("application")?.item(0) as? Element
+        ?: error("Legacy compatibility: LVL gate readback failed; manifest application is missing.")
+    val packageName = document.documentElement.getAttribute("package")
+    val targetName = launcherActivityName?.let { manifestActivityName(it, packageName) }
+    fun activity(name: String) = (0 until application.childNodes.length)
+        .mapNotNull { application.childNodes.item(it) as? Element }
+        .firstOrNull { it.tagName == "activity" && manifestActivityName(it.androidAttribute("name"), packageName) == name }
+    val downloader = activity(GOOGLE_EXPANSION_DOWNLOADER_ACTIVITY)
+        ?: error("Legacy compatibility: LVL gate readback failed; DownloaderActivity is missing.")
+    val unity = targetName?.let { name ->
+        activity(name) ?: error("Legacy compatibility: LVL gate readback failed; detected Unity activity '$name' is missing.")
+    }
+    check(downloader.isLauncherComponent() && unity?.isLauncherComponent() != true) {
+        "Legacy compatibility: LVL gate readback failed; DownloaderActivity must remain launcher and detected Unity activity must not become launcher."
     }
 }
 

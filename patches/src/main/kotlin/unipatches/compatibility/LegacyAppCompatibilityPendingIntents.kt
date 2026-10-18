@@ -270,24 +270,20 @@ internal fun intentStringConstructorRegisters(instruction: ReferenceInstruction)
 }
 
 /**
- * Google ExpansionDownloader invokes LVL from DownloaderActivity only when expansion data is absent.
- * A pre-staged OBB can therefore skip LVL even without launcher transfer; moving the launcher also
- * makes the normal LVL path unreachable. Refuse either behavior while LicenseChecker remains in DEX.
+ * Google ExpansionDownloader skips its LVL service check when expansion data is already delivered.
+ * Allow pre-staging or launcher bypass only after the standard service gate has been emitted and
+ * verified; unsupported LicenseChecker flows remain fail-closed.
  */
 internal fun validateExpansionDownloaderLicenseFlow(
     bypassSelected: Boolean,
     embeddedObbSelected: Boolean,
     hasExpansionDownloader: Boolean,
     hasLicenseChecker: Boolean,
+    verifiedGate: Boolean,
 ) {
-    val prepopulatedObbMaySkipLicense = embeddedObbSelected && hasLicenseChecker
-    require(!hasLicenseChecker || (!bypassSelected && !prepopulatedObbMaySkipLicense)) {
-        val cause = when {
-            bypassSelected -> "expansion downloader bypass makes existing LicenseChecker.checkAccess unreachable"
-            hasExpansionDownloader -> "pre-staging the OBB makes DownloaderActivity treat expansion files as delivered and skip its LicenseChecker flow"
-            else -> "pre-staging the OBB may bypass an existing LicenseChecker flow that cannot be proven"
-        }
-        "Legacy compatibility: $cause; license verification cannot be proven. Disable OBB embedding/downloader bypass or implement a verified launcher-side license flow."
+    val gateRequired = hasLicenseChecker && (bypassSelected || embeddedObbSelected)
+    require(!gateRequired || (hasExpansionDownloader && verifiedGate)) {
+        "Legacy compatibility: OBB pre-staging or downloader bypass could skip an existing LicenseChecker flow; a verified ExpansionDownloader LVL gate was not emitted. Disable OBB pre-staging/downloader bypass or use a supported downloader."
     }
 }
 
@@ -296,6 +292,8 @@ internal fun legacyLicenseServiceIntentPatch(
     enabledProvider: () -> Boolean,
     bypassExpansionDownloaderProvider: () -> Boolean = { false },
     embeddedExpansionObbProvider: () -> Boolean = { false },
+    verifiedExpansionLicenseGateProvider: () -> Boolean = { false },
+    diagnosticsOnlyProvider: () -> Boolean = { false },
 ) = bytecodePatch(
     name = null,
     description = "Internal explicit Google Play licensing service intent phase.",
@@ -313,11 +311,18 @@ internal fun legacyLicenseServiceIntentPatch(
             if (classDef.type == LICENSE_CHECKER_CLASS) hasLicenseChecker = true
             if (classDef.type == GOOGLE_EXPANSION_DOWNLOADER_TYPE) hasExpansionDownloader = true
         }
+        if (diagnosticsOnlyProvider()) {
+            if (hasLicenseChecker && (bypassSelected || embeddedObbSelected)) {
+                logger.info("Legacy compatibility: diagnostics-only would require a verified ExpansionDownloader LVL gate; no DEX changes applied.")
+            }
+            return@execute
+        }
         validateExpansionDownloaderLicenseFlow(
             bypassSelected,
             embeddedObbSelected,
             hasExpansionDownloader,
             hasLicenseChecker,
+            verifiedExpansionLicenseGateProvider(),
         )
         if (!hasLicenseChecker) {
             logger.info("Legacy compatibility: Google Play LicenseChecker not found; no LVL intent change made.")

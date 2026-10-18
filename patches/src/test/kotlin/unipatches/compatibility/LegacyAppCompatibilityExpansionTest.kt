@@ -392,6 +392,14 @@ class LegacyAppCompatibilityExpansionTest {
         assertTrue(assertThrows(IllegalArgumentException::class.java) {
             validateExpansionDownloaderBypass(true, true, true, "/tmp/main.1.example.obb", null)
         }.message!!.contains("could not identify a unique Unity launch activity"))
+        validateExpansionDownloaderBypass(
+            selected = true,
+            unityDetected = true,
+            obbEmbeddingSelected = true,
+            obbPath = "/tmp/main.1.example.obb",
+            launcherActivity = null,
+            verifiedLicenseGate = true,
+        )
     }
 
     @Test
@@ -402,6 +410,19 @@ class LegacyAppCompatibilityExpansionTest {
         assertEquals(0, launcherFilterCount(activity(document, "com.google.android.vending.expansion.downloader_impl.DownloaderActivity")))
         assertEquals(2, launcherFilterCount(activity(document, TEST_UNITY_ACTIVITY)))
         verifyExpansionDownloaderLauncher(document, TEST_UNITY_ACTIVITY)
+    }
+
+    @Test
+    fun licenseGateKeepsDownloaderLauncherAndUnityActivityInternal() {
+        val document = launcherDocument(unityHasLauncher = false, downloaderFilters = 1)
+        verifyExpansionDownloaderLicenseLauncher(document, TEST_UNITY_ACTIVITY)
+        assertEquals(1, launcherFilterCount(activity(document, "com.google.android.vending.expansion.downloader_impl.DownloaderActivity")))
+        assertEquals(0, launcherFilterCount(activity(document, TEST_UNITY_ACTIVITY)))
+
+        moveExpansionDownloaderLauncher(document, Logger.getLogger("test"), TEST_UNITY_ACTIVITY)
+        assertThrows(IllegalStateException::class.java) {
+            verifyExpansionDownloaderLicenseLauncher(document, TEST_UNITY_ACTIVITY)
+        }
     }
 
     @Test

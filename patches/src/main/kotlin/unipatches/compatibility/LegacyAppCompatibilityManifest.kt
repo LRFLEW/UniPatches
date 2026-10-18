@@ -494,9 +494,9 @@ val legacyAppCompatibilityPatch = resourcePatch(
 
         Presets add ordinary fixes; Custom booleans start off. Ambiguous receiver calls are skipped.
         Native checks reject APK library collisions during relocation and DT_TEXTREL for target SDK 23+.
-        OBB pre-staging and downloader bypass are refused when they could skip an existing
-        LicenseChecker. These safeguards may stop patching. Target SDK spoofing cannot repair
-        incompatible code.
+        With LicenseChecker, keep standard ExpansionDownloader launcher and run LVL before
+        staged OBB validation. Deny/error
+        blocks Unity; unsupported flows fail closed. Target SDK spoofing cannot repair code.
 
         Does not bypass Google licensing or Play Services. Use Control Embedded Auth / Stores Patch
         for those. It cannot restore stopped servers, unsupported ABIs, server licensing,
@@ -708,13 +708,13 @@ val legacyAppCompatibilityPatch = resourcePatch(
         title = "Legacy App Compatibility > Expansion data and OBB > Embed and stage expansion OBB",
         default = false,
         key = "legacyCompatibilityEmbedExpansionObb",
-        description = "Use when the app needs an OBB at first launch and no downloader can provide it. The file is bundled inside the APK and copied to the expected OBB folder; this can greatly increase APK size. Pre-staging can skip license checks; the patch refuses this option whenever a LicenseChecker class exists, even if its downloader flow cannot be identified.",
+        description = "Use when the app needs an OBB at first launch. The file is bundled inside the APK and copied to the expected OBB folder; this can greatly increase APK size. If a LicenseChecker exists, only the recognized Google ExpansionDownloader flow is supported: its original LVL service check is forced before OBB validation, and deny/error blocks Unity. Unsupported flows fail closed.",
     )
     val bypassExpansionDownloaderRaw by booleanOption(
         title = "Legacy App Compatibility > Expansion data and OBB > Bypass known Unity expansion downloader",
         default = false,
         key = "legacyCompatibilityBypassExpansionDownloader",
-        description = "Use only for the standard Google ExpansionDownloader when it blocks startup despite bundled OBB data. The target activity is detected from DownloaderActivity's Intent(Class) launch and must inherit a Unity engine activity base class. It is not a general downloader repair, requires Embed and stage expansion OBB, fails if a single safe target cannot be proven, and is refused when a LicenseChecker exists.",
+        description = "Use only for the standard Google ExpansionDownloader when bundled OBB data should skip its download UI. Requires Embed and stage expansion OBB. If LicenseChecker exists, DownloaderActivity remains launcher, existing LVL service check runs first, download controls stay hidden during that check, and only allow continues to OBB validation/Unity. Deny/error blocks launch; unsupported flows fail closed.",
     )
     val allScreensRaw by booleanOption(
         title = "Legacy App Compatibility > Storage and display > Support All Screens",
@@ -791,6 +791,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
     val embedExpansionObb by option { embedExpansionObbRaw == true }
     val bypassExpansionDownloader by option { bypassExpansionDownloaderRaw == true }
     val expansionLauncherTarget = LegacyExpansionLauncherTarget()
+    val expansionLicenseGate = LegacyExpansionDownloaderLicenseGateResult()
     val allScreens by option { allScreensRaw == true }
     val extractNativeLibs by option { extractNativeLibsRaw == true }
     val disableHeapTagging by option { disableHeapTaggingRaw == true }
@@ -800,7 +801,10 @@ val legacyAppCompatibilityPatch = resourcePatch(
 
     dependsOn(legacyImeiPatch { Pair(!diagnosticsOnly && spoofImei, imei.orEmpty().trim()) })
     dependsOn(openIabReceiverFlagsPatch { if (diagnosticsOnly) OPEN_IAB_DISABLED else openIabReceiverRegistrationMode })
-    dependsOn(legacyExpansionLauncherTargetPatch(expansionLauncherTarget) { bypassExpansionDownloader })
+    dependsOn(legacyExpansionDownloaderLicenseGatePatch(expansionLicenseGate) {
+        !diagnosticsOnly && (embedExpansionObb || bypassExpansionDownloader)
+    })
+    dependsOn(legacyExpansionLauncherTargetPatch(expansionLauncherTarget) { bypassExpansionDownloader && !expansionLicenseGate.verified })
     dependsOn(legacyExpansionFilesPatch {
         LegacyExpansionOptions(
             obbPath = expansionObbPath.orEmpty().trim(),
@@ -825,15 +829,14 @@ val legacyAppCompatibilityPatch = resourcePatch(
     dependsOn(legacyDownloaderPendingIntentPatch { !diagnosticsOnly })
     dependsOn(
         legacyLicenseServiceIntentPatch(
-            enabledProvider = {
-                !diagnosticsOnly && !(bypassExpansionDownloader == true && detectedEngines.unity &&
-                    embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty())
-            },
+            enabledProvider = { !diagnosticsOnly },
             bypassExpansionDownloaderProvider = {
                 bypassExpansionDownloader == true && detectedEngines.unity &&
                     embedExpansionObb == true && expansionObbPath.orEmpty().trim().isNotEmpty()
             },
             embeddedExpansionObbProvider = { embedExpansionObb == true },
+            verifiedExpansionLicenseGateProvider = { expansionLicenseGate.verified },
+            diagnosticsOnlyProvider = { diagnosticsOnly },
         ),
     )
     dependsOn(legacyCompatibilityBytecodePreflightPatch(enabledProvider = { diagnosticsOnly }))
@@ -943,6 +946,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
             obbEmbeddingSelected = embedExpansionObb == true,
             obbPath = obbPathForLog,
             launcherActivity = expansionLauncherTarget.activityName,
+            verifiedLicenseGate = expansionLicenseGate.verified,
         )
         val selectedForegroundMappings = if (applyForegroundServiceTypes == true) {
             get("AndroidManifest.xml", false).inputStream().use { input ->
@@ -1194,9 +1198,14 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 }
             }
             if (bypassExpansionDownloader == true) {
-                val launcherActivity = expansionLauncherTarget.activityName
-                    ?: error("Legacy compatibility: downloader bypass activity detection failed: ${expansionLauncherTarget.error}")
-                changed += moveExpansionDownloaderLauncher(manifest, logger, launcherActivity)
+                if (expansionLicenseGate.verified) {
+                    verifyExpansionDownloaderLicenseLauncher(manifest)
+                    logger.info("Legacy compatibility: retained DownloaderActivity launcher; verified LVL gate routes allowed launches through original Unity flow.")
+                } else {
+                    val launcherActivity = expansionLauncherTarget.activityName
+                        ?: error("Legacy compatibility: downloader bypass activity detection failed: ${expansionLauncherTarget.error}")
+                    changed += moveExpansionDownloaderLauncher(manifest, logger, launcherActivity)
+                }
             }
             if (allScreens == true) {
                 val (removed, updated) = supportAllScreens(manifest)
@@ -1247,13 +1256,22 @@ val legacyAppCompatibilityPatch = resourcePatch(
             }
             logger.info("Legacy compatibility: package visibility queries verified for targetSdk ${packageVisibilityTarget}: ${packageVisibilityApplied.joinToString()}.")
         }
-        if (bypassExpansionDownloader == true) {
+        if (bypassExpansionDownloader == true || expansionLicenseGate.verified) {
             val launcherActivity = expansionLauncherTarget.activityName
-                ?: error("Legacy compatibility: downloader bypass activity detection failed: ${expansionLauncherTarget.error}")
-            get("AndroidManifest.xml", false).inputStream().use { input ->
-                document(input).use { verifyExpansionDownloaderLauncher(it, launcherActivity) }
+            if (bypassExpansionDownloader == true && !expansionLicenseGate.verified && launcherActivity == null) {
+                error("Legacy compatibility: downloader bypass activity detection failed: ${expansionLauncherTarget.error}")
             }
-            logger.info("Legacy compatibility: downloader bypass manifest verified after transformation; DownloaderActivity is not launcher and $launcherActivity is launcher.")
+            get("AndroidManifest.xml", false).inputStream().use { input ->
+                document(input).use {
+                    if (expansionLicenseGate.verified) verifyExpansionDownloaderLicenseLauncher(it, launcherActivity)
+                    else verifyExpansionDownloaderLauncher(it, requireNotNull(launcherActivity))
+                }
+            }
+            if (expansionLicenseGate.verified) {
+                logger.info("Legacy compatibility: manifest readback verified DownloaderActivity remains launcher; Unity launch stays behind LVL allow.")
+            } else {
+                logger.info("Legacy compatibility: downloader bypass manifest verified after transformation; DownloaderActivity is not launcher and $launcherActivity is launcher.")
+            }
         }
         if (repairFileUriSharing == true) {
             if (fileUriSharingResult.patchedCallSites == 0 && fileUriSharingResult.alreadyPatchedCallSites == 0) {
