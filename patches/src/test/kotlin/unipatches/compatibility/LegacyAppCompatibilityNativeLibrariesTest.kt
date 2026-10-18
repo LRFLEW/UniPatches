@@ -21,6 +21,7 @@ class LegacyAppCompatibilityNativeLibrariesTest {
 
         assertEquals(32, metadata.bits)
         assertTrue(metadata.littleEndian)
+        assertEquals(40, metadata.machine)
         assertEquals("liblegacy.so", metadata.soname)
         assertTrue(metadata.hasTextRelocations)
     }
@@ -31,9 +32,24 @@ class LegacyAppCompatibilityNativeLibrariesTest {
         val clean = inspectElf(elf64(textRelFlags = false))
 
         assertEquals(64, textRel.bits)
+        assertEquals(62, textRel.machine)
         assertTrue(textRel.hasTextRelocations)
         assertFalse(clean.hasTextRelocations)
         assertEquals("liblegacy.so", clean.soname)
+    }
+
+    @Test
+    fun `recognizes only matching proxy and full library identities`() {
+        val proxy = inspectElf(elf32(textRel = false, soname = "libunity_proxy.so"))
+        val replacement = inspectElf(elf32(textRel = false, soname = "libunity.so"))
+        val unrelated = inspectElf(elf32(textRel = false, soname = "libother.so"))
+        val wrongMachine = inspectElf(elf64(textRelFlags = false))
+
+        assertTrue(isMatchingProxyNativeLibraryPair(proxy, replacement, "libunity.so"))
+        assertFalse(isMatchingProxyNativeLibraryPair(proxy, unrelated, "libunity.so"))
+        assertFalse(isMatchingProxyNativeLibraryPair(proxy, wrongMachine, "libunity.so"))
+        assertFalse(isMatchingProxyNativeLibraryPair(replacement, replacement, "libunity.so"))
+        assertFalse(isMatchingProxyNativeLibraryPair(proxy, replacement, "not-a-library"))
     }
 
     @Test
@@ -123,13 +139,14 @@ class LegacyAppCompatibilityNativeLibrariesTest {
         }
     }
 
-    private fun elf32(textRel: Boolean): ByteArray {
+    private fun elf32(textRel: Boolean, soname: String = "liblegacy.so"): ByteArray {
         val bytes = ByteArray(512)
         val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         bytes[0] = 0x7f
         bytes[1] = 'E'.code.toByte(); bytes[2] = 'L'.code.toByte(); bytes[3] = 'F'.code.toByte()
         bytes[4] = 1; bytes[5] = 1
         buffer.putShort(16, 3.toShort())
+        buffer.putShort(18, 40.toShort())
         buffer.putInt(28, 52)
         buffer.putShort(40, 52.toShort())
         buffer.putShort(42, 32.toShort())
@@ -140,10 +157,10 @@ class LegacyAppCompatibilityNativeLibrariesTest {
         fun tag(tag: Int, value: Int) {
             buffer.putInt(dynamicOffset, tag); buffer.putInt(dynamicOffset + 4, value); dynamicOffset += 8
         }
-        tag(5, 400); tag(10, 14); tag(14, 1)
+        tag(5, 400); tag(10, soname.toByteArray().size + 2); tag(14, 1)
         if (textRel) tag(22, 0)
         tag(0, 0)
-        "\u0000liblegacy.so\u0000".toByteArray().copyInto(bytes, 400)
+        "\u0000$soname\u0000".toByteArray().copyInto(bytes, 400)
         return bytes
     }
 
@@ -154,6 +171,7 @@ class LegacyAppCompatibilityNativeLibrariesTest {
         bytes[1] = 'E'.code.toByte(); bytes[2] = 'L'.code.toByte(); bytes[3] = 'F'.code.toByte()
         bytes[4] = 2; bytes[5] = 1
         buffer.putShort(16, 3.toShort())
+        buffer.putShort(18, 62.toShort())
         buffer.putLong(32, 64)
         buffer.putShort(52, 64.toShort())
         buffer.putShort(54, 56.toShort())

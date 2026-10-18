@@ -11,6 +11,7 @@ import java.util.zip.ZipFile
 internal data class ElfNativeMetadata(
     val bits: Int,
     val littleEndian: Boolean,
+    val machine: Int,
     val soname: String?,
     val hasTextRelocations: Boolean,
 )
@@ -48,6 +49,18 @@ private const val MAX_PROGRAM_HEADERS = 1024
 private const val MAX_DYNAMIC_BYTES = 1 shl 20
 private const val MAX_STRING_BYTES = 512
 
+internal fun isMatchingProxyNativeLibraryPair(
+    existingProxy: ElfNativeMetadata,
+    obbLibrary: ElfNativeMetadata,
+    fileName: String,
+): Boolean {
+    if (!fileName.startsWith("lib") || !fileName.endsWith(".so")) return false
+    val proxySoname = "${fileName.removeSuffix(".so")}_proxy.so"
+    return existingProxy.soname == proxySoname && obbLibrary.soname == fileName &&
+        existingProxy.bits == obbLibrary.bits && existingProxy.littleEndian == obbLibrary.littleEndian &&
+        existingProxy.machine == obbLibrary.machine
+}
+
 internal fun inspectElf(bytes: ByteArray): ElfNativeMetadata =
     inspectElf(bytes.size.toLong()) { offset, size ->
         require(offset >= 0 && size >= 0 && offset <= bytes.size.toLong() - size) { "ELF read outside fixture" }
@@ -81,6 +94,7 @@ private fun inspectElf(size: Long, readAt: (Long, Int) -> ByteArray): ElfNativeM
     require(size >= headerSize) { "truncated ELF${bits} header" }
     val header = ByteBuffer.wrap(readAt(0, headerSize)).order(order)
     require(unsignedShort(header.getShort(16)) == 3) { "ELF file is not a shared object" }
+    val machine = unsignedShort(header.getShort(18))
     val programOffset = if (bits == 32) unsignedInt(header.getInt(28)) else unsignedLong(header.getLong(32))
     val elfHeaderSize = unsignedShort(header.getShort(if (bits == 32) 40 else 52))
     val programEntrySize = unsignedShort(header.getShort(if (bits == 32) 42 else 54))
@@ -147,7 +161,7 @@ private fun inspectElf(size: Long, readAt: (Long, Int) -> ByteArray): ElfNativeM
         val terminator = nameBytes.indexOf(0)
         if (terminator <= 0) null else nameBytes.copyOfRange(0, terminator).toString(Charsets.UTF_8)
     }
-    return ElfNativeMetadata(bits, littleEndian, soname, textRelocations)
+    return ElfNativeMetadata(bits, littleEndian, machine, soname, textRelocations)
 }
 
 internal fun inspectNativeLibrary(

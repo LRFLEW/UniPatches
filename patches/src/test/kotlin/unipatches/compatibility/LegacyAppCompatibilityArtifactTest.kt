@@ -199,6 +199,31 @@ class LegacyAppCompatibilityArtifactTest {
         }
     }
 
+    @Test fun gunBrosTarget24WithRelocationRefusesTextRelocationsAfterProxyPreservation() {
+        val input = System.getenv("LEGACY_TEST_APK")
+        val obbPath = System.getenv("LEGACY_TEST_OBB")
+        assumeNotNull(input, obbPath)
+        val apk = File(input!!)
+        val obb = File(obbPath!!)
+        require(apk.isFile && obb.isFile) { "Set LEGACY_TEST_APK and LEGACY_TEST_OBB to the original Gun Bros 2 artifacts" }
+        val originalObbSha256 = expansionSha256(obb)
+        val patch = legacyAppCompatibilityPatch
+        patch.options.values.forEach { it.reset() }
+        try {
+            patch.options["legacyCompatibilitySpoofTargetSdk"] = true
+            patch.options["legacyCompatibilityTargetSdk"] = 24
+            patch.options["legacyCompatibilityRelocateExpansionNativeLibraries"] = true
+            patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
+            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/native-relocation-target24"), patch)
+            assertNotNull("TargetSdk 24 must not ship text-relocation libraries", failure)
+            assertTrue(failure!!.contains("DT_TEXTREL"))
+            assertFalse(failure.contains("would overwrite existing APK entries"))
+            assertEquals(originalObbSha256, expansionSha256(obb))
+        } finally {
+            patch.options.values.forEach { it.reset() }
+        }
+    }
+
     @Test fun gunBrosEmbeddingObbFailsWhenItWouldSkipLicenseVerification() {
         val input = System.getenv("LEGACY_TEST_APK")
         val obbPath = System.getenv("LEGACY_TEST_OBB")
@@ -242,7 +267,7 @@ class LegacyAppCompatibilityArtifactTest {
         }
     }
 
-    @Test fun gunBrosNativeRelocationRejectsExistingProxyLibrariesAndPreservesObb() {
+    @Test fun gunBrosNativeRelocationPreservesProxyLibrariesAndStagesTheirAssets() {
         val input = System.getenv("LEGACY_TEST_APK")
         val obbPath = System.getenv("LEGACY_TEST_OBB")
         assumeNotNull(input, obbPath)
@@ -253,14 +278,28 @@ class LegacyAppCompatibilityArtifactTest {
         val patch = legacyAppCompatibilityPatch
         patch.options.values.forEach { it.reset() }
         try {
-            patch.options["legacyCompatibilitySpoofTargetSdk"] = false
-            patch.options["legacyCompatibilityTargetSdk"] = 24
             patch.options["legacyCompatibilityRelocateExpansionNativeLibraries"] = true
             patch.options["legacyCompatibilityExpansionObbPath"] = obb.absolutePath
-            val failure = runPatcherFailure(apk, File("build/legacy-artifacts/native-collision"), patch)
-            assertNotNull("Relocation must refuse Gun Bros APK proxy-library collisions", failure)
-            assertTrue(failure!!.contains("overwrite existing APK libraries"))
-            assertTrue(failure.contains("lib/armeabi-v7a/libunity.so") || failure.contains("lib/armeabi-v7a/libmono.so"))
+            val output = File("build/legacy-artifacts/native-proxy-preserved.apk").apply { parentFile?.mkdirs() }
+            apk.copyTo(output, overwrite = true)
+            Patcher(PatcherConfig(apk, File("build/legacy-artifacts/native-proxy-preserved-work"))).use { patcher ->
+                patcher += setOf(patch)
+                runBlocking { patcher().collect { result -> result.exception?.let { throw it } } }
+                patcher.get().applyTo(output)
+            }
+            assertApkNativeLibrariesUnchanged(apk, output)
+            ZipFile(apk).use { originalApk ->
+                ZipFile(obb).use { originalObb ->
+                    ZipFile(output).use { patched ->
+                        listOf("libmono.so", "libunity.so").forEach { name ->
+                            val libraryPath = "lib/armeabi-v7a/$name"
+                            val assetPath = "assets/libs/armeabi-v7a/$name"
+                            assertEquals("APK proxy was not preserved at $libraryPath", zipEntryDigest(originalApk, libraryPath), zipEntryDigest(patched, libraryPath))
+                            assertEquals("OBB full library was not staged at $assetPath", zipEntryDigest(originalObb, assetPath), zipEntryDigest(patched, assetPath))
+                        }
+                    }
+                }
+            }
             assertEquals(originalObbSha256, expansionSha256(obb))
         } finally {
             patch.options.values.forEach { it.reset() }

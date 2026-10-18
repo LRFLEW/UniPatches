@@ -29,6 +29,10 @@ internal fun expansionAssetPath(fileName: String): String = "$EXPANSION_ASSET_DI
 
 internal fun isSafeApkNativeLibraryPath(path: String): Boolean = apkNativeEntryPattern.matches(path)
 
+internal fun isSafeExpansionNativeDestination(source: String, destination: String): Boolean =
+    (expansionNativeDestination(source) == destination && isSafeApkNativeLibraryPath(destination)) ||
+        (source == destination && expansionNativeDestination(source) != null)
+
 private fun safeExpansionText(value: String): String =
     value.map { if (Character.isISOControl(it)) ' ' else it }.joinToString("").take(240)
 
@@ -232,16 +236,14 @@ internal fun validateExpansionNativeLibraryDestinations(
     nativeEntries: List<Pair<String, String>>,
     existingApkEntries: Set<String>,
 ) {
-    require(nativeEntries.all { (source, destination) ->
-        expansionNativeDestination(source) == destination && isSafeApkNativeLibraryPath(destination)
-    }) {
+    require(nativeEntries.all { (source, destination) -> isSafeExpansionNativeDestination(source, destination) }) {
         "Legacy compatibility: native-library relocation refused because an OBB source or destination path is unsafe."
     }
     val collisions = nativeEntries.filter { (_, destination) -> destination in existingApkEntries }
     require(collisions.isEmpty()) {
-        "Legacy compatibility: native-library relocation refused because OBB entries would overwrite existing APK libraries: " +
+        "Legacy compatibility: native-library relocation refused because OBB entries would overwrite existing APK entries: " +
             collisions.joinToString { (source, destination) -> "${safeExpansionText(source)} -> ${safeExpansionText(destination)}" } +
-            ". Original proxy libraries and OBB entries were preserved; disable relocation or use a compatible OBB."
+            ". Original APK and OBB entries were preserved; disable relocation or use a compatible OBB."
     }
 }
 
@@ -250,9 +252,7 @@ internal fun stageExpansionNativeLibraries(
     nativeEntries: List<Pair<String, String>>,
     outputForDestination: (String) -> File,
 ): List<StagedExpansionNativeLibrary> {
-    require(nativeEntries.all { (source, destination) ->
-        expansionNativeDestination(source) == destination && isSafeApkNativeLibraryPath(destination)
-    }) {
+    require(nativeEntries.all { (source, destination) -> isSafeExpansionNativeDestination(source, destination) }) {
         "Legacy compatibility: native-library staging refused because an OBB source or destination path is unsafe."
     }
     require(nativeEntries.map { it.second }.toSet().size == nativeEntries.size) {
@@ -351,7 +351,7 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
             for (entry in entries) {
                 val destination = expansionNativeDestination(entry.name) ?: continue
                 require(!entry.isDirectory && entry.size > 0) {
-                    "Legacy compatibility: invalid native library entry in OBB: ${entry.name}"
+                    "Legacy compatibility: invalid native library entry in OBB: ${safeExpansionText(entry.name)}"
                 }
                 nativeEntries += entry.name to destination
             }
@@ -362,11 +362,40 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
                 require(nativeEntries.isNotEmpty()) {
                     "Legacy compatibility: requested native-library relocation, but OBB contains no assets/libs/<abi>/*.so entries."
                 }
-                validateExpansionNativeLibraryDestinations(nativeEntries, listApkEntries("lib/").toSet())
-                val stagedLibraries = stageExpansionNativeLibraries(zip, nativeEntries) { destination -> get(destination, false) }
+                val apkEntries = listApkEntries().toSet()
+                val stagingPlan = nativeEntries.map { (sourceEntry, libraryDestination) ->
+                    if (libraryDestination !in apkEntries) {
+                        sourceEntry to libraryDestination
+                    } else {
+                        val apkProxy = try {
+                            inspectElfFile(get(libraryDestination, true))
+                        } catch (error: Exception) {
+                            throw IllegalArgumentException(
+                                "Legacy compatibility: cannot safely classify existing APK library ${safeExpansionText(libraryDestination)}; it will not be overwritten.",
+                                error,
+                            )
+                        }
+                        val obbEntry = zip.getEntry(sourceEntry)
+                            ?: error("Legacy compatibility: OBB native library entry is missing: ${safeExpansionText(sourceEntry)}")
+                        val obbLibrary = inspectElfZipEntry(zip, obbEntry)
+                        val fileName = libraryDestination.substringAfterLast('/')
+                        require(isMatchingProxyNativeLibraryPair(apkProxy, obbLibrary, fileName)) {
+                            "Legacy compatibility: native-library relocation refused because existing APK library " +
+                                "${safeExpansionText(libraryDestination)} is not a verified proxy for ${safeExpansionText(sourceEntry)}; no APK library was overwritten."
+                        }
+                        logger.info(
+                            "Legacy compatibility: verified proxy pair for ${safeExpansionText(libraryDestination)}; preserving APK proxy and staging full library at ${safeExpansionText(sourceEntry)}.",
+                        )
+                        sourceEntry to sourceEntry
+                    }
+                }
+                validateExpansionNativeLibraryDestinations(stagingPlan, apkEntries)
+                val stagedLibraries = stageExpansionNativeLibraries(zip, stagingPlan) { destination -> get(destination, false) }
                 stagedLibraries.forEach { staged ->
+                    val abi = staged.entryName.removePrefix("assets/libs/").substringBefore('/')
+                    val collision = if (staged.destination == staged.entryName) "proxy-preserved" else "none"
                     logger.info(
-                        "Legacy compatibility: OBB native library staged source=${staged.entryName} destination=${staged.destination} abi=${staged.destination.removePrefix("lib/").substringBefore('/')} collision=none sourceBytes=${staged.sourceBytes} outputBytes=${staged.outputBytes} sourceSha256=${staged.sourceSha256} outputSha256=${staged.outputSha256}.",
+                        "Legacy compatibility: OBB native library staged source=${staged.entryName} destination=${staged.destination} abi=$abi collision=$collision sourceBytes=${staged.sourceBytes} outputBytes=${staged.outputBytes} sourceSha256=${staged.sourceSha256} outputSha256=${staged.outputSha256}.",
                     )
                 }
             }

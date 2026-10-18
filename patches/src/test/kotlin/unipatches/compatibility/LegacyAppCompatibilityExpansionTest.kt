@@ -216,7 +216,10 @@ class LegacyAppCompatibilityExpansionTest {
 
         assertTrue(assertThrows(IllegalArgumentException::class.java) {
             validateExpansionNativeLibraryDestinations(listOf(unity to unityOutput), setOf(unityOutput))
-        }.message!!.contains("overwrite existing APK libraries"))
+        }.message!!.contains("overwrite existing APK entries"))
+        assertTrue(assertThrows(IllegalArgumentException::class.java) {
+            validateExpansionNativeLibraryDestinations(listOf(unity to unity), setOf(unity))
+        }.message!!.contains("overwrite existing APK entries"))
         ZipFile(source).use { zip ->
             val failure = assertThrows(IllegalArgumentException::class.java) {
                 stageExpansionNativeLibraries(zip, listOf(unity to unityOutput, mono to monoOutput)) { File(root, it) }
@@ -228,6 +231,31 @@ class LegacyAppCompatibilityExpansionTest {
         assertArrayEquals(originalObb, source.readBytes())
         source.delete()
         root.deleteRecursively()
+    }
+
+    @Test
+    fun stagesVerifiedProxyPayloadAtItsExpectedAssetPathWithoutReplacingApkLibrary() {
+        val source = File.createTempFile("legacy-proxy-assets-", ".obb")
+        val root = java.nio.file.Files.createTempDirectory("legacy-proxy-assets-root-").toFile()
+        val entryName = "assets/libs/armeabi-v7a/libunity.so"
+        val bytes = "full unity library".toByteArray()
+        ZipOutputStream(source.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry(entryName))
+            zip.write(bytes)
+            zip.closeEntry()
+        }
+        try {
+            validateExpansionNativeLibraryDestinations(listOf(entryName to entryName), emptySet())
+            ZipFile(source).use { zip ->
+                val staged = stageExpansionNativeLibraries(zip, listOf(entryName to entryName)) { File(root, it) }.single()
+                assertEquals(entryName, staged.destination)
+                assertArrayEquals(bytes, staged.file.readBytes())
+                assertFalse(File(root, "lib/armeabi-v7a/libunity.so").exists())
+            }
+        } finally {
+            source.delete()
+            root.deleteRecursively()
+        }
     }
 
     @Test

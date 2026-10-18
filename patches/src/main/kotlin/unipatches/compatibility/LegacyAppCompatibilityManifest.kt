@@ -696,7 +696,7 @@ val legacyAppCompatibilityPatch = resourcePatch(
         title = "Legacy App Compatibility > Expansion data and OBB > Relocate native libraries from OBB",
         default = false,
         key = "legacyCompatibilityRelocateExpansionNativeLibraries",
-        description = "Use if the app's native .so libraries are incorrectly stored inside the selected OBB and the game cannot load them. Copies them into the APK's matching ABI library folders; leave off if the OBB has no such libraries or the app already works.",
+        description = "Use if native .so files are stored inside the selected OBB. Copies full libraries into APK ABI folders when safe; for a verified *_proxy.so pair, preserves the APK proxy and stages the full library at its expected assets/libs path. Unknown collisions fail instead of overwriting existing libraries.",
     )
     val removeRelocatedNativeLibrariesFromObbRaw by booleanOption(
         title = "Legacy App Compatibility > Expansion data and OBB > Remove relocated native libraries from embedded OBB",
