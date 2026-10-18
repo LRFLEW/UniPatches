@@ -1,3 +1,9 @@
+## [1.33.1](https://github.com/Zanuaimi/UniPatches/compare/v1.33.0...v1.33.1) (2026-10-18)
+
+### 🐛 Bug Fixes
+
+* fix resourcePatch patch error in compatibility patch ([4e90567](https://github.com/Zanuaimi/UniPatches/commit/4e9056733d627ec0454a6dc5be1b8c07e4a282e8))
+
 ## [1.33.0](https://github.com/Zanuaimi/UniPatches/compare/v1.32.0...v1.33.0) (2026-10-18)
 
 ### ✨ New Features
