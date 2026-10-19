@@ -367,8 +367,9 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
                     if (libraryDestination !in apkEntries) {
                         sourceEntry to libraryDestination
                     } else {
+                        val apkProxyFile = get(libraryDestination, true)
                         val apkProxy = try {
-                            inspectElfFile(get(libraryDestination, true))
+                            inspectElfFile(apkProxyFile)
                         } catch (error: Exception) {
                             throw IllegalArgumentException(
                                 "Legacy compatibility: cannot safely classify existing APK library ${safeExpansionText(libraryDestination)}; it will not be overwritten.",
@@ -378,8 +379,9 @@ internal fun legacyExpansionFilesPatch(optionsProvider: () -> LegacyExpansionOpt
                         val obbEntry = zip.getEntry(sourceEntry)
                             ?: error("Legacy compatibility: OBB native library entry is missing: ${safeExpansionText(sourceEntry)}")
                         val obbLibrary = inspectElfZipEntry(zip, obbEntry)
-                        val fileName = libraryDestination.substringAfterLast('/')
-                        require(isMatchingProxyNativeLibraryPair(apkProxy, obbLibrary, fileName)) {
+                        require(
+                            isVerifiedProxyAssetRoute(apkProxy, obbLibrary, apkProxyFile, sourceEntry),
+                        ) {
                             "Legacy compatibility: native-library relocation refused because existing APK library " +
                                 "${safeExpansionText(libraryDestination)} is not a verified proxy for ${safeExpansionText(sourceEntry)}; no APK library was overwritten."
                         }

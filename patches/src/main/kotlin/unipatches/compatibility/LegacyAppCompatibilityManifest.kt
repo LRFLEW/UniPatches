@@ -1011,9 +1011,10 @@ val legacyAppCompatibilityPatch = resourcePatch(
             "Legacy compatibility: APK contains a native-library path outside lib/<abi>/<name>.so; refusing ambiguous native metadata or relocation."
         }
         val apkNativePathSet = apkNativePaths.toSet()
-        val nativeInspections = apkNativePaths.map { path ->
+        val apkNativeInspections = apkNativePaths.map { path ->
             inspectNativeLibrary(path, get(path, false), destination = path, collision = false)
-        }.toMutableList()
+        }
+        val nativeInspections = apkNativeInspections.toMutableList()
         val inspectObbLibraries = obbPathForLog.isNotBlank() || embedExpansionObb == true || relocateExpansionNativeLibraries == true || removeRelocatedNativeLibrariesFromObb == true
         if (inspectObbLibraries) {
             val packageName = StartupHooks.resolvedPackageName
@@ -1036,23 +1037,56 @@ val legacyAppCompatibilityPatch = resourcePatch(
                 val nativeEntries = nativeCandidates.filter { expansionNativeDestination(it.name) != null }
                 nativeInspections += nativeEntries.map { entry ->
                     val destination = requireNotNull(expansionNativeDestination(entry.name))
-                    inspectNativeLibrary(zip, entry, destination, destination in apkNativePathSet)
+                    val inspection = inspectNativeLibrary(zip, entry, destination, destination in apkNativePathSet)
+                    val apkProxy = apkNativeInspections.firstOrNull { it.path == destination }
+                    if (apkProxy?.metadata != null && inspection.metadata != null &&
+                        isVerifiedProxyAssetRoute(apkProxy.metadata, inspection.metadata, get(destination, false), entry.name)
+                    ) {
+                        inspection.copy(destination = entry.name, collision = false, proxyPairPreserved = true)
+                    } else {
+                        inspection
+                    }
                 }
             }
         }
-        nativeInspections.forEach { inspection ->
+        val dexNativeLoadAnalysis = runCatching {
+            val dexEntries = listApkEntries("classes").filter { it.matches(Regex("classes[0-9]*\\.dex")) }.distinct()
+            if (dexEntries.size > MAX_DEX_SCAN_ENTRIES) {
+                NativeLoadAnalysis(emptySet(), listOf("APK DEX entry count exceeds the 64-file load-analysis limit"))
+            } else {
+                inspectDexNativeLoads(dexEntries.map { it to get(it, false) })
+            }
+        }.getOrElse {
+            NativeLoadAnalysis(emptySet(), listOf("cannot enumerate APK DEX native-load references"))
+        }
+        val manifestElements = nativeManifest.getElementsByTagName("*")
+        val manifestNativeActivity = (0 until manifestElements.length).any { index ->
+            val component = manifestElements.item(index) as? Element ?: return@any false
+            when (component.manifestLocalName()) {
+                "activity" -> component.androidAttribute("name") == "android.app.NativeActivity"
+                "activity-alias" -> component.androidAttribute("targetActivity") == "android.app.NativeActivity"
+                "meta-data" -> component.androidAttribute("name") == "android.app.lib_name"
+                else -> false
+            }
+        }
+        val classifiedNativeInspections = classifyNativeLibraryReachability(
+            nativeInspections,
+            dexNativeLoadAnalysis,
+            manifestNativeActivity,
+        )
+        classifiedNativeInspections.forEach { inspection ->
             val message = formatNativeLibraryInspection(inspection, effectiveNativeTarget)
             if (inspection.metadata == null) logger.warning(message) else logger.info(message)
         }
         fun nativeIssueSummary(issues: List<String>): String = issues.take(12).joinToString("; ") +
             if (issues.size > 12) "; and ${issues.size - 12} additional finding(s)" else ""
-        val nativeIssues = nativeLibraryCompatibilityIssues(nativeInspections, effectiveNativeTarget)
+        val nativeIssues = nativeLibraryCompatibilityIssues(classifiedNativeInspections, effectiveNativeTarget)
         if (nativeIssues.isNotEmpty()) {
             val message = "Legacy compatibility: native libraries are not proven safe for effective targetSdk ${effectiveNativeTarget ?: "unknown"}: ${nativeIssueSummary(nativeIssues)}"
             if (diagnosticsOnly == true) logger.warning("$message. Diagnostics only; no APK changes applied.") else error(message)
         }
         val plannedNativeIssues = if (diagnosticsOnly == true && plannedNativeTarget != null && plannedNativeTarget != effectiveNativeTarget) {
-            nativeLibraryCompatibilityIssues(nativeInspections, plannedNativeTarget)
+            nativeLibraryCompatibilityIssues(classifiedNativeInspections, plannedNativeTarget)
         } else emptyList()
         if (plannedNativeIssues.isNotEmpty()) {
             logger.warning(
@@ -1060,7 +1094,35 @@ val legacyAppCompatibilityPatch = resourcePatch(
             )
         }
         if (nativeIssues.isEmpty() && plannedNativeIssues.isEmpty()) {
-            logger.info("Legacy compatibility: no DT_TEXTREL or malformed ELF incompatibility detected for effective targetSdk ${effectiveNativeTarget ?: "unknown"}; JNI entrypoints and runtime loader outcome remain unknown.")
+            val unresolvedElfLibraries = classifiedNativeInspections.filter {
+                it.reachability != NativeLibraryReachability.PROVEN_UNREACHABLE && it.metadata == null
+            }
+            val textRelocationLibraries = classifiedNativeInspections.filter {
+                it.reachability != NativeLibraryReachability.PROVEN_UNREACHABLE && it.metadata?.hasTextRelocations == true
+            }
+            val target = effectiveNativeTarget ?: "unknown"
+            val textRelocationPaths = textRelocationLibraries.take(8).joinToString(", ") { inspection ->
+                inspection.path.filterNot { Character.isISOControl(it) }.take(200)
+            }
+            val unresolvedPaths = unresolvedElfLibraries.take(8).joinToString(", ") { inspection ->
+                inspection.path.filterNot { Character.isISOControl(it) }.take(200)
+            }
+            val textRelocationMore = if (textRelocationLibraries.size > 8) ", and ${textRelocationLibraries.size - 8} more" else ""
+            val unresolvedMore = if (unresolvedElfLibraries.size > 8) ", and ${unresolvedElfLibraries.size - 8} more" else ""
+            when {
+                textRelocationLibraries.isNotEmpty() && unresolvedElfLibraries.isNotEmpty() -> logger.info(
+                    "Legacy compatibility: DT_TEXTREL remains in $textRelocationPaths$textRelocationMore and ELF inspection failed for $unresolvedPaths$unresolvedMore; targetSdk $target is below API 23. No metadata was stripped; runtime loader behavior remains unknown.",
+                )
+                textRelocationLibraries.isNotEmpty() -> logger.info(
+                    "Legacy compatibility: DT_TEXTREL remains in $textRelocationPaths$textRelocationMore; effective targetSdk $target is below the API 23 rejection threshold. Relocations were not stripped; runtime loader behavior remains unknown.",
+                )
+                unresolvedElfLibraries.isNotEmpty() -> logger.info(
+                    "Legacy compatibility: ELF inspection failed for $unresolvedPaths$unresolvedMore; effective targetSdk $target is below API 23. No binaries were changed; loader compatibility remains unknown.",
+                )
+                else -> logger.info(
+                    "Legacy compatibility: no reachable or unresolved DT_TEXTREL/malformed ELF incompatibility detected for effective targetSdk $target; JNI entrypoints and runtime loader outcome remain unknown.",
+                )
+            }
         }
         if (diagnosticsOnly == true) {
             get("AndroidManifest.xml", false).inputStream().use { input ->
