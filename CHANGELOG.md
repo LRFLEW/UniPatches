@@ -1,3 +1,9 @@
+## [1.33.4](https://github.com/Zanuaimi/UniPatches/compare/v1.33.3...v1.33.4) (2026-10-19)
+
+### 🐛 Bug Fixes
+
+* **compatibility:** Fix native libraries ([7ce4854](https://github.com/Zanuaimi/UniPatches/commit/7ce4854f13c5d8015fd1ab53084c1adffb195f48))
+
 ## [1.33.3](https://github.com/Zanuaimi/UniPatches/compare/v1.33.2...v1.33.3) (2026-10-19)
 
 ### 🐛 Bug Fixes

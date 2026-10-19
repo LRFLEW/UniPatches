@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-10-19T03:38:40",
-  "description": "## [1.33.3](https://github.com/Zanuaimi/UniPatches/compare/v1.33.2...v1.33.3) (2026-10-19)\n\n### 🐛 Bug Fixes\n\n* **compatibility:** Fix XML patch error ([7be85e0](https://github.com/Zanuaimi/UniPatches/commit/7be85e03103bb249206a1d959c2bf2ea4b747ad9))",
-  "download_url": "https://github.com/Zanuaimi/UniPatches/releases/download/v1.33.3/patches-1.33.3.mpp",
+  "created_at": "2026-10-19T06:03:31",
+  "description": "## [1.33.4](https://github.com/Zanuaimi/UniPatches/compare/v1.33.3...v1.33.4) (2026-10-19)\n\n### 🐛 Bug Fixes\n\n* **compatibility:** Fix native libraries ([7ce4854](https://github.com/Zanuaimi/UniPatches/commit/7ce4854f13c5d8015fd1ab53084c1adffb195f48))",
+  "download_url": "https://github.com/Zanuaimi/UniPatches/releases/download/v1.33.4/patches-1.33.4.mpp",
   "signature_download_url": "",
-  "version": "1.33.3"
+  "version": "1.33.4"
 }
