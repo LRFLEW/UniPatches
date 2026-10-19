@@ -2,12 +2,21 @@ package unipatches.compatibility
 
 import org.w3c.dom.Document
 import org.w3c.dom.Element
+import org.xml.sax.SAXException
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.net.IDN
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import java.util.Locale
-import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.transform.OutputKeys
+import javax.xml.transform.TransformerException
 import javax.xml.transform.TransformerFactory
 import javax.xml.transform.dom.DOMSource
 import javax.xml.transform.stream.StreamResult
@@ -147,28 +156,133 @@ internal fun resolveNetworkSecurityConfigPaths(reference: String, entries: List<
 internal fun isCleartextDomainConfig(document: Document): Boolean =
     document.documentElement?.localNameOrTag() == NETWORK_SECURITY_CONFIG
 
+private const val MAX_SECURE_XML_BYTES = 8 * 1024 * 1024
+private val xmlEncodingPattern = Regex("""<\?xml\s+[^?]*encoding\s*=\s*(['"])([^'"]+)\1""", RegexOption.IGNORE_CASE)
+
 internal fun readSecureXml(file: File): Document = file.inputStream().use(::readSecureXml)
 
 internal fun readSecureXml(input: InputStream): Document {
-    val factory = DocumentBuilderFactory.newInstance().apply {
-        isNamespaceAware = true
-        setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        setFeature("http://xml.org/sax/features/external-general-entities", false)
-        setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-        setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
-        setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
-        setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
+    val bytes = readBoundedXml(input)
+    // Android's DOM provider does not support Xerces-specific feature URIs. Reject DTDs before parsing,
+    // independent of provider, and deny all external entity resolution as a second guard.
+    rejectXmlDocumentTypes(decodeXmlForSecurityCheck(bytes))
+
+    val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+    val builder = factory.newDocumentBuilder()
+    builder.setEntityResolver { _, _ -> throw SAXException("External XML entities are disabled.") }
+    return builder.parse(ByteArrayInputStream(bytes))
+}
+
+private fun readBoundedXml(input: InputStream): ByteArray {
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(8192)
+    var total = 0
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        if (count == 0) {
+            val value = input.read()
+            if (value < 0) break
+            total++
+            require(total <= MAX_SECURE_XML_BYTES) {
+                "Legacy compatibility: XML input exceeds the 8 MiB secure parsing limit."
+            }
+            output.write(value)
+            continue
+        }
+        total += count
+        require(total <= MAX_SECURE_XML_BYTES) {
+            "Legacy compatibility: XML input exceeds the 8 MiB secure parsing limit."
+        }
+        output.write(buffer, 0, count)
     }
-    return factory.newDocumentBuilder().parse(input)
+    return output.toByteArray()
+}
+
+private fun secureXmlCharset(name: String): Charset = try {
+    Charset.forName(name)
+} catch (error: Exception) {
+    throw IllegalArgumentException("Legacy compatibility: XML encoding is unsupported on this runtime.", error)
+}
+
+private fun decodeXmlForSecurityCheck(bytes: ByteArray): String {
+    fun starts(vararg prefix: Int) = bytes.size >= prefix.size && prefix.indices.all { (bytes[it].toInt() and 0xff) == prefix[it] }
+    val (charset, offset) = when {
+        starts(0x00, 0x00, 0xfe, 0xff) -> secureXmlCharset("UTF-32BE") to 4
+        starts(0xff, 0xfe, 0x00, 0x00) -> secureXmlCharset("UTF-32LE") to 4
+        starts(0xef, 0xbb, 0xbf) -> StandardCharsets.UTF_8 to 3
+        starts(0xfe, 0xff) -> StandardCharsets.UTF_16BE to 2
+        starts(0xff, 0xfe) -> StandardCharsets.UTF_16LE to 2
+        starts(0x00, 0x00, 0x00, 0x3c) -> secureXmlCharset("UTF-32BE") to 0
+        starts(0x3c, 0x00, 0x00, 0x00) -> secureXmlCharset("UTF-32LE") to 0
+        bytes.size >= 4 && bytes[0] == 0.toByte() && (bytes[1].toInt() and 0xff) == 0x3c &&
+            bytes[2] == 0.toByte() && bytes[3] != 0.toByte() -> StandardCharsets.UTF_16BE to 0
+        bytes.size >= 4 && (bytes[0].toInt() and 0xff) == 0x3c && bytes[1] == 0.toByte() &&
+            bytes[2] != 0.toByte() && bytes[3] == 0.toByte() -> StandardCharsets.UTF_16LE to 0
+        else -> {
+            val prefix = String(bytes, 0, minOf(bytes.size, 1024), StandardCharsets.ISO_8859_1)
+            val declaredEncoding = xmlEncodingPattern.find(prefix)?.groupValues?.get(2)
+            if (declaredEncoding == null) {
+                val firstMarkup = bytes.indexOfFirst { it != 0x09.toByte() && it != 0x0a.toByte() && it != 0x0d.toByte() && it != 0x20.toByte() }
+                require(firstMarkup >= 0 && bytes[firstMarkup] == '<'.code.toByte()) {
+                    "Legacy compatibility: XML encoding cannot be checked safely."
+                }
+            }
+            val declared = secureXmlCharset(declaredEncoding ?: "UTF-8")
+            val encodedMarkup = try {
+                declared.newEncoder().encode(CharBuffer.wrap("<!DOCTYPE"))
+            } catch (error: Exception) {
+                throw IllegalArgumentException("Legacy compatibility: XML encoding cannot be checked safely.", error)
+            }
+            require(encodedMarkup.remaining() == 9 && (0 until 9).all { (encodedMarkup.get(it).toInt() and 0xff) == "<!DOCTYPE"[it].code }) {
+                "Legacy compatibility: XML encoding cannot be checked safely."
+            }
+            declared to 0
+        }
+    }
+    return try {
+        charset.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes, offset, bytes.size - offset))
+            .toString()
+    } catch (error: Exception) {
+        throw IllegalArgumentException("Legacy compatibility: XML encoding cannot be checked safely.", error)
+    }
+}
+
+private fun rejectXmlDocumentTypes(xml: String) {
+    var index = 0
+    while (index < xml.length) {
+        val end = when {
+            xml.startsWith("<!--", index) -> xml.indexOf("-->", index + 4).also {
+                require(it >= 0) { "Legacy compatibility: malformed XML comment." }
+            } + 3
+            xml.startsWith("<![CDATA[", index) -> xml.indexOf("]]>", index + 9).also {
+                require(it >= 0) { "Legacy compatibility: malformed XML CDATA section." }
+            } + 3
+            xml.startsWith("<?", index) -> xml.indexOf("?>", index + 2).also {
+                require(it >= 0) { "Legacy compatibility: malformed XML processing instruction." }
+            } + 2
+            xml.startsWith("<!DOCTYPE", index) || xml.startsWith("<!ENTITY", index) ->
+                throw IllegalArgumentException("Legacy compatibility: XML DTD and entity declarations are forbidden.")
+            else -> index + 1
+        }
+        index = end
+    }
 }
 
 internal fun writeSecureXml(document: Document, file: File) {
+    // This identity transform receives only sanitized DOM; it never loads a stylesheet or URI input.
+    require(document.doctype == null) { "Legacy compatibility: refusing to serialize an XML document with a DOCTYPE." }
     check(file.parentFile?.let { it.isDirectory || it.mkdirs() } != false) { "Cannot create directory for network security config $file" }
-    val factory = TransformerFactory.newInstance().apply {
-        setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
-        setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "")
+    val factory = TransformerFactory.newInstance()
+    factory.setURIResolver { _, _ -> throw TransformerException("External XML resources are disabled.") }
+    val transformer = factory.newTransformer().apply {
+        setOutputProperty(OutputKeys.METHOD, "xml")
+        setOutputProperty(OutputKeys.ENCODING, "UTF-8")
     }
-    factory.newTransformer().transform(DOMSource(document), StreamResult(file))
+    transformer.transform(DOMSource(document), StreamResult(file))
 }
 
 internal fun ensurePublicXmlResourceId(
