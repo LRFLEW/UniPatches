@@ -1,3 +1,9 @@
+## [1.33.3](https://github.com/Zanuaimi/UniPatches/compare/v1.33.2...v1.33.3) (2026-10-19)
+
+### 🐛 Bug Fixes
+
+* **compatibility:** Fix XML patch error ([7be85e0](https://github.com/Zanuaimi/UniPatches/commit/7be85e03103bb249206a1d959c2bf2ea4b747ad9))
+
 ## [1.33.2](https://github.com/Zanuaimi/UniPatches/compare/v1.33.1...v1.33.2) (2026-10-18)
 
 ### 🐛 Bug Fixes
